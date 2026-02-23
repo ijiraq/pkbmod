@@ -12,7 +12,7 @@ import glob, os, gc
 from torch.nn import functional
 from sklearn.cluster import DBSCAN
 #import trippy
-import time
+import tim
 #from tensorflow import keras
 
 from astropy.visualization import ManualInterval, ZScaleInterval

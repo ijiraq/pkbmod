@@ -12,5 +12,6 @@
         "postman.postman-for-vscode",
         "alexcvzz.vscode-sqlite",
         "ms-vscode-remote.remote-containers",
+        "openai.chatgpt",
     ]
 }
