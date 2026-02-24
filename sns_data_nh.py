@@ -21,7 +21,7 @@ def get_device() -> torch.device:
     """
     gpu_available = torch.cuda.is_available()
     message = "Using GPU" if gpu_available else "No GPU. Using CPU"
-    logging.warning(message)
+    logging.info(message)
     return torch.device("cuda:0" if gpu_available else "cpu")
 
 
@@ -40,6 +40,7 @@ def pack_data(warp_dict: {int: fits.HDUList},
     VARIANCE_EXTNO = 3
     datas, masks, variances = [], [], []
     dmjds, psfs, fwhms, im_nums = [], [], [], []
+    logging.debug(f"Creating numpy data lists to pack data onto GPU with.")
     for im_num in warp_dict:
         hdul = warp_dict[im_num]
         datas.append(hdul[DATA_EXTNO].data)

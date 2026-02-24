@@ -26,38 +26,54 @@ def main():
                         help="Configure the logging level.",
                         choices=logging.getLevelNamesMapping().keys())
     parser.add_argument('--no-tty', default=False, action='store_true')
-    parser.add_argument('--bitmask', default=None, type=str,
+    parser.add_argument('--bitmask', type=str,
                         help=('The bitmask used with these data. '
                               '(ommit to read keys from mask extension.)'))
     parser.add_argument('--flagkeys', default='flagkeys_nh.dat', type=str,
                         help='File with list of keys to mask.')
-    parser.add_argument('--clust-dist-lim', default=4.0, type=float)
-    parser.add_argument('--clust-min-samp', default=2, type=int)
+    parser.add_argument('--clust-dist-lim', default=4.0, 
+                        help="maximum distance between candidate and linear motion line in clustering routine", 
+                        type=float)
+    parser.add_argument('--clust-min-samp',
+                        help="minimum number of clustered detections required", 
+                        default=2, type=int)
     parser.add_argument('--dontUseNegativeWell',
                         help="Use negative well as detection criterion",
                         default=False,
                         action='store_true')
-    parser.add_argument('--kernel-width', default=15, type=int)
-    parser.add_argument('--min_snr', default=4.5, type=float)
-    parser.add_argument('--trim-snr', default=5.5, type=float)
-    parser.add_argument('--n-keep', default=4, type=int)
-    parser.add_argument('--peak-offset-max', default=4.0, type=float)
-    parser.add_argument('--rate_fwhm_grid_step', default=0.75, type=float)
+    parser.add_argument('--kernel-width', help="Width of the psf kernel", 
+                        default=15, type=int)
+    parser.add_argument('--min_snr', help="Minimum SNR to be considered a detection",
+                        default=4.5, type=float)
+    parser.add_argument('--trim-snr', help="Trim candidates with SNR below this value, after clustering",
+                        default=5.5, type=float)
+    parser.add_argument('--n-keep', help="For each pixel keep the n-keep highest SNR detections for further filtering.",
+                        default=4, type=int)
+    parser.add_argument('--peak-offset-max', 
+                        help="max distance between peak and centre of stamp",
+                        default=4.0, type=float)
+    parser.add_argument('--rate_fwhm_grid_step',
+                        help="width of rate grid steps in units of FWHM",
+                        default=0.75, type=float)
     parser.add_argument('--read-from-params', action='store_true',
-                        default=True,
+                        default=False,
                         help=(f'Read from ROOT_DIR/{APP_NAME}/params.txt and '
                               'ignore command line inputs'))
     parser.add_argument('--use-gaussian-kernel', action='store_true',
+                        help="Don't use a PSF model file, build kernel using guassian.",
                         default=False)
-    parser.add_argument('--variance-trim', default=1.3, type=float)
+    parser.add_argument('--variance-trim', default=1.3, type=float,
+                        help="factor above median variance to mask pixels",
+                        )
     parser.add_argument('--rt', action='store_true',
                         default=False,
-                        help='Run on the rt diff images instead.')
+                        help='Run on the reverse time diff images instead.')
     parser.add_argument('--collections',
                         type=str,
                         default='DIFFS',
                         help="Sub-directory of BASER_DIR with warps to stack")
     parser.add_argument('--dataset-type', type=str,
+                        help="dataset type of difference images to stack",
                         default="diff_directWarp")
     parser.add_argument(
         '--base-dir',

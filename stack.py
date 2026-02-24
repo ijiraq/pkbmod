@@ -60,6 +60,14 @@ class DataLoad(object):
     scrambled: bool = False  # Time scrambled prefix
 
 
+def oom_observer(device, alloc, device_alloc, device_free):
+    logging.debug("Out of memory! Saving snapshot...")
+    snapshot = torch.cuda.memory._snapshot()
+    from pickle import dump
+    with open('oom_snapshot.pkl', 'wb') as f:
+        dump(snapshot, f)
+
+
 def run(dataload: DataLoad, stackparams: StackParams):
     """Given the data load and stacking parameters run the shift-and-stack
     search.
@@ -68,13 +76,14 @@ def run(dataload: DataLoad, stackparams: StackParams):
         dataload (DataLoad): diffs, masks, variance, psfs, plants, etc
         stackparams (StackParams): parameters to use for the sns search
     """
-
+    
     # mask high, low, nan and inf pixels and
     # remove images that are fully masked
     stack_inputs = data.pack_data(dataload.warps,
                                   dataload.psfs,
                                   dataload.properties)
-    stack_inputs = data.mask_variance(stack_inputs, bitmask=dataload.bitmask,
+    stack_inputs = data.mask_variance(stack_inputs, 
+                                      bitmask=dataload.bitmask,
                                       variance_trim=stackparams.variance_trim)
 
     # convert all stack_inputs into numpy arrays
@@ -94,17 +103,20 @@ def run(dataload: DataLoad, stackparams: StackParams):
     plants = dataload.plants
     results_filename = dataload.results_filename
     plant_matches_filename = dataload.plant_matches_filename
-    (A, B) = datas[0].shape
+    bitmask = dataload.bitmask
 
     # now define the parameters based on stackparams object.
     badflags = stackparams.badflags
-    bitmask = dataload.bitmask
     rate_fwhm_grid_step = stackparams.rate_fwhm_grid_step
     n_keep = stackparams.n_keep
-    khw = stackparams.kernel_width//2
+    kernel_width = stackparams.kernel_width
+    khw = kernel_width//2
+    use_gaussian_kernel = stackparams.use_gaussian_kernel
+    use_negative_well = stackparams.use_negative_well
     peak_offset_max = stackparams.peak_offset_max
     dist_lim = stackparams.dist_lim
     min_samp = stackparams.min_samp
+    min_snr = stackparams.min_snr
     trim_snr = stackparams.trim_snr
     dist_max = stackparams.dist_max
     dist_rate_max = stackparams.dist_rate_max
@@ -115,14 +127,17 @@ def run(dataload: DataLoad, stackparams: StackParams):
         dmjds=dmjds,
         rate_fwhm_grid_step=rate_fwhm_grid_step)
 
+    logging.debug(f"Creating the convolution kernel: Use Guassian:{use_gaussian_kernel}")
     kernel = data.create_kernel(
         psfs=psfs,
         dmjds=dmjds,
         rates=rates,
-        useNegativeWell=stackparams.use_negative_well,
-        useGaussianKernel=stackparams.use_gaussian_kernel,
-        kernel_width=stackparams.kernel_width,
+        useNegativeWell=use_negative_well,
+        useGaussianKernel=use_gaussian_kernel,
+        kernel_width=kernel_width,
         im_nums=im_nums)
+
+    (A, B) = datas[0].shape
 
     np_datas = np.expand_dims(np.expand_dims(
         np.array(datas, dtype='float32'), 0), 0)
@@ -140,7 +155,7 @@ def run(dataload: DataLoad, stackparams: StackParams):
     # below is original line based on logic in comment above
     # which appears to be wrong?
     # w = np.where(~((np_masks & badmask) == 0) | np.isnan(datas))
-
+    logging.debug("Masking the np arrays that will be used for stacking.")
     badflags = np.array([2**bitmask[flag] for flag in badflags]).sum()
     # where pixels are bad
     w = np.where(~((np_masks & badflags) == 0) | np.isnan(datas))
@@ -161,6 +176,7 @@ def run(dataload: DataLoad, stackparams: StackParams):
     # set device value based on gpu availability.
     device = data.get_device()
     # push the data to the device for tourch shift-and-stack
+    logging.debug(f"Loading data onto {device}")
     datas = torch.tensor(np_datas).to(device)
     inv_variances = torch.tensor(np_inv_variances).to(device)
     n_im = int(torch.tensor(float(datas.size()[2])).to(device).item())
@@ -179,19 +195,21 @@ def run(dataload: DataLoad, stackparams: StackParams):
     # do the shift-stacking
     snr_image, alpha_image = utils.run_shifts(datas, inv_variances, rates,
                                               dmjds,
-                                              stackparams.min_snr,
+                                              min_snr,
                                               writeTestImages=False)
-    logging.info('Done shifting')
+    if n_keep > len(rates):
+        logging.warn((f"Number of stack rate: {len(rates)}"
+                      f"is smaller than request n_keep {n_keep}. "
+                      f"Only keeping {len(rates)} detections per pixel"))
+        n_keep = min(n_keep, len(rates))
 
     # sort and keep the top n_keep detections,
-    # this step approximately doubles the memory footprint to 60 GB.
-    # Could do this in stages to reduce memory footprint
-    # at the cost of processing speed
-    # sort_inds = torch.sort(snr_image, 2, descending=True)[1]
-    # sort inds hack
-    sort_inds = torch.zeros((1, 1, stackparams.n_keep, A, B),
+    sort_inds = torch.zeros((1, 1, n_keep, A, B),
                             dtype=torch.int64, device='cpu')
+    logging.debug(f'Packing {snr_image.shape} into {sort_inds.shape}')
 
+    # sort on the SNR index (2) and select the top n_keep 
+    # these shift rates of those top SNR are selected as the detection
     sort_step = 1000
     a = 0
     b = sort_step
@@ -200,7 +218,7 @@ def run(dataload: DataLoad, stackparams: StackParams):
         logging.debug(f' Sorting {a} to {b} of {B}...')
         sort_inds_wedge = torch.sort(
             snr_image[:, :, :, :, a:b].to(device), 2, descending=True)[1]
-        sort_inds[:, :, :, :, a:b] = sort_inds_wedge[:, :, :4, :, :]
+        sort_inds[:, :, :, :, a:b] = sort_inds_wedge[:, :, :n_keep, :, :]
         a += sort_step
         logging.debug('Done')
 
@@ -232,11 +250,12 @@ def run(dataload: DataLoad, stackparams: StackParams):
     cv = torch.zeros_like(im_datas)
     cv[0, 0, 0] = inv_vars[0, 0, 0]
 
-    keeps = utils.brightness_filter(im_datas, inv_vars, c, cv, kernel, dmjds,
-                                    rates, detections, khw, n_im,
-                                    n_bright_test=10,
-                                    test_high=1.15,
-                                    test_low=0.85)
+    keeps = utils.brightness_filter_fast(im_datas, inv_vars, c, cv, kernel, dmjds,
+                                         rates, detections, khw, n_im,
+                                         n_bright_test=10,
+                                         test_high=1.15,
+                                         test_low=0.85, 
+                                         exact_check=False)
 
     logging.info(f"Number of detections: {len(detections)}")
     logging.info(f"Number kept: {len(keeps)}")
@@ -274,7 +293,7 @@ def run(dataload: DataLoad, stackparams: StackParams):
     # apply predictive clustering
     clust_detections, clust_stamps = utils.predictive_line_cluster(
         filt_detections, stamps, dmjds, dist_lim, min_samp,
-        init_select_proc_distance=60, show_plot=False)
+        init_select_proc_distance=60)
     del stamps
     gc.collect()
 
@@ -295,7 +314,7 @@ def run(dataload: DataLoad, stackparams: StackParams):
 
     grid_detections, grid_stamps = utils.position_filter(
         clust_detections, clust_stamps, im_datas, inv_vars,
-        c, cv, kernel, dmjds, rates, khw)
+        c, cv, kernel, dmjds, rates, khw, exact_check=False)
 
     w = np.where(grid_detections[:, 5] >= trim_snr)
     final_detections = grid_detections[w]
@@ -317,10 +336,10 @@ def run(dataload: DataLoad, stackparams: StackParams):
     for i in range(len(plants)):
         for detection_type in detection_types:
             det = detection_types[detection_type]
-            dist_sq = ((plants['x0'] - det[:, 0])**2 +
-                       (plants['y0'] - det[:, 1])**2)
-            dist_rate_sq = ((plants['rate_x'] - det[:, 2])**2 +
-                            (plants['rate_y'] - det[:, 3])**2)
+            dist_sq = ((plants['x0'][i] - det[:, 0])**2 +
+                       (plants['y0'][i] - det[:, 1])**2)
+            dist_rate_sq = ((plants['rate_x'][i] - rates[np.round(det[:, 2]).astype("int"), 0])**2 +
+                            (plants['rate_y'][i] - rates[np.round(det[:, 2]).astype("int"), 1])**2)
             w = (dist_sq < dist_max**2) & (dist_rate_sq < dist_rate_max**2)
             plants[detection_type][i] = w.sum() > 0
         plants['min_dist_r'][i] = np.min(dist_sq)**0.5
@@ -328,7 +347,9 @@ def run(dataload: DataLoad, stackparams: StackParams):
         plants['num_match'][i] = w.sum()
 
     logging.info(f"Numer of plants found {(plants['num_match'] > 0).sum()}")
-    plants.write(plant_matches_filename, format='ascii.commented_header')
+    plants.write(plant_matches_filename,
+                 format='ascii.commented_header',
+                 overwrite=True)
 
     args = np.argsort(final_detections[:, 5])[::-1]
     final_detections = final_detections[args]
@@ -337,6 +358,11 @@ def run(dataload: DataLoad, stackparams: StackParams):
     logging.info(f"Saving to: {results_filename}")
     with open(results_filename, 'w+') as han:
         for i in range(len(final_detections)):
-            (x, y, rx, ry, f, snr) = final_detections[i, :6]
+            (x, y, rx, ry, f, snr) = (final_detections[i, 0],
+                                      final_detections[i, 1], 
+                                      rates[round(final_detections[i, 2]), 0], 
+                                      rates[round(final_detections[i, 2]), 1],
+                                      final_detections[i, 4],
+                                      final_detections[i, 5])
             row = {"snr": snr, "x": x, "y": y, "x_v": rx, "y_v": ry}
-            han.write(" ".join(["{key}: {row[key]}" for key in row])+"\n")
+            han.write(" ".join([f"{key}: {row[key]}" for key in row])+"\n")

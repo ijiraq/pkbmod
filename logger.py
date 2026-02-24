@@ -7,7 +7,7 @@ def config_logging(level: str, filename, no_tty=False):
     # Create a StreamHandler and set its level and format
     stream_handler = logging.StreamHandler(sys.stdout)
     stream_handler.setLevel(level) # Set the desired level for the console
-    stream_formatter = logging.Formatter('%(filename)s:%(lineno)d %(module)-12s: %(levelname)-8s %(message)s')
+    stream_formatter = logging.Formatter('%(asctime)s %(filename)s:%(lineno)d %(module)s.%(funcName)s: %(levelname)-8s %(message)s')
     stream_handler.setFormatter(stream_formatter)
 
     # Create a FileHandler and set its level and format
