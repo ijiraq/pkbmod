@@ -76,7 +76,9 @@ def run(dataload: DataLoad, stackparams: StackParams):
         dataload (DataLoad): diffs, masks, variance, psfs, plants, etc
         stackparams (StackParams): parameters to use for the sns search
     """
-    
+    # this routine is setup to store the index in the detection tensor rather
+    # than the rates.
+    use_index = True
     # mask high, low, nan and inf pixels and
     # remove images that are fully masked
     stack_inputs = data.pack_data(dataload.warps,
@@ -225,7 +227,7 @@ def run(dataload: DataLoad, stackparams: StackParams):
     # trim the negative SNR sources. The reason these show up is
     # because the likelihood formalism sucks
     detections = utils.trim_negative_snr(snr_image, alpha_image, sort_inds,
-                                         n_keep, rates, A, B)
+                                         n_keep, rates, A, B, use_index=True)
     del snr_image, alpha_image, sort_inds
     gc.collect()
     torch.cuda.empty_cache()
@@ -255,7 +257,8 @@ def run(dataload: DataLoad, stackparams: StackParams):
                                          n_bright_test=10,
                                          test_high=1.15,
                                          test_low=0.85, 
-                                         exact_check=False)
+                                         exact_check=False,
+                                         use_index=use_index)
 
     logging.info(f"Number of detections: {len(detections)}")
     logging.info(f"Number kept: {len(keeps)}")
@@ -274,7 +277,8 @@ def run(dataload: DataLoad, stackparams: StackParams):
     # create the stamps
     mean_stamps = utils.create_stamps(im_datas, im_masks,
                                       c, cv, dmjds, rates,
-                                      filt_detections, khw)
+                                      filt_detections, khw,
+                                      use_index=use_index)
     del im_masks
     gc.collect()
     torch.cuda.empty_cache()
@@ -314,7 +318,7 @@ def run(dataload: DataLoad, stackparams: StackParams):
 
     grid_detections, grid_stamps = utils.position_filter(
         clust_detections, clust_stamps, im_datas, inv_vars,
-        c, cv, kernel, dmjds, rates, khw, exact_check=False)
+        c, cv, kernel, dmjds, rates, khw, use_index=use_index)
 
     w = np.where(grid_detections[:, 5] >= trim_snr)
     final_detections = grid_detections[w]
@@ -338,8 +342,15 @@ def run(dataload: DataLoad, stackparams: StackParams):
             det = detection_types[detection_type]
             dist_sq = ((plants['x0'][i] - det[:, 0])**2 +
                        (plants['y0'][i] - det[:, 1])**2)
-            dist_rate_sq = ((plants['rate_x'][i] - rates[np.round(det[:, 2]).astype("int"), 0])**2 +
-                            (plants['rate_y'][i] - rates[np.round(det[:, 2]).astype("int"), 1])**2)
+            # lookup the rate in the rates array if use_index
+            if use_index:
+                rx = rates[round(det[:, 2]).astype("int"), 0]
+                ry = rates[round(det[:, 2]).astype("int"), 1]
+            else:
+                rx = final_detections[:, 2]
+                ry = final_detections[:, 3]
+            dist_rate_sq = ((plants['rate_x'][i] - rx**2) +
+                            (plants['rate_y'][i] - ry**2))
             w = (dist_sq < dist_max**2) & (dist_rate_sq < dist_rate_max**2)
             plants[detection_type][i] = w.sum() > 0
         plants['min_dist_r'][i] = np.min(dist_sq)**0.5
@@ -358,10 +369,17 @@ def run(dataload: DataLoad, stackparams: StackParams):
     logging.info(f"Saving to: {results_filename}")
     with open(results_filename, 'w+') as han:
         for i in range(len(final_detections)):
+            # lookup the rate in the rates if use_index
+            if use_index:
+                rx = rates[round(final_detections[i, 2]), 0]
+                ry = rates[round(final_detections[i, 2]), 1]
+            else:
+                rx = final_detections[i, 2]
+                ry = final_detections[i, 3]
             (x, y, rx, ry, f, snr) = (final_detections[i, 0],
                                       final_detections[i, 1], 
-                                      rates[round(final_detections[i, 2]), 0], 
-                                      rates[round(final_detections[i, 2]), 1],
+                                      rx, 
+                                      ry,
                                       final_detections[i, 4],
                                       final_detections[i, 5])
             row = {"snr": snr, "x": x, "y": y, "x_v": rx, "y_v": ry}

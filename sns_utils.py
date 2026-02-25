@@ -82,7 +82,8 @@ def run_shifts(datas, inv_variances, rates, dmjds, min_snr,
     return snr_image, alpha_image
 
 
-def trim_negative_snr(snr_image, alpha_image, sort_inds, n_keep, rates, A, B):
+def trim_negative_snr(snr_image, alpha_image, sort_inds, 
+                      n_keep, rates, A, B, use_index=False):
     # trim the negative SNR sources. The reason these show up is
     # because the likelihood formalism sucks
     idx, idy = np.meshgrid(np.arange(B), np.arange(A))
@@ -102,9 +103,12 @@ def trim_negative_snr(snr_image, alpha_image, sort_inds, n_keep, rates, A, B):
             keeps = np.zeros((len(inds), 7), dtype='float32')
             keeps[:, 0] = idx[inds]
             keeps[:, 1] = idy[inds]
-            # keeps[:, 2] = rates[s.reshape(A*B)[inds], 0]
-            keeps[:, 2] = s.reshape(A*B)[inds]
-            keeps[:, 3] = rates[s[inds], 1]
+            if use_index:
+                keeps[:, 2] = s.reshape(A*B)[inds]
+                keeps[:, 3] = 0.0
+            else:
+                keeps[:, 2] = rates[s.reshape(A*B)[inds], 0]
+                keeps[:, 3] = rates[s[inds], 1]
             keeps[:, 4] = alpha.reshape(A*B)[inds]
             keeps[:, 5] = SNR.reshape(A*B)[inds]
         else:
@@ -112,9 +116,12 @@ def trim_negative_snr(snr_image, alpha_image, sort_inds, n_keep, rates, A, B):
             logging.debug(f"Keeps size: {nkeeps.shape}")
             nkeeps[:, 0] = idx[inds]
             nkeeps[:, 1] = idy[inds]
-            # nkeeps[:, 2] = rates[s.reshape(A*B)[inds], 0]
-            nkeeps[:, 2] = s[inds]
-            nkeeps[:, 3] = rates[s[inds], 1]
+            if use_index:
+                nkeeps[:, 2] = s[inds]
+                nkeeps[:, 3] = 0.0
+            else:
+                nkeeps[:, 2] = rates[s.reshape(A*B)[inds], 0]
+                nkeeps[:, 3] = rates[s[inds], 1]
             nkeeps[:, 4] = alpha.reshape(A*B)[inds]
             nkeeps[:, 5] = SNR.reshape(A*B)[inds]
             keeps = np.concatenate([keeps, nkeeps])
@@ -194,7 +201,7 @@ def brightness_filter(im_datas, inv_vars, c, cv, kernel,
 
 def create_stamps(im_datas, im_masks, c, cv, dmjds, rates,
                   filt_detections, khw, 
-                  exact_check=False, inexact_rtol=1.e-7,):
+                  exact_check=False, inexact_rtol=1.e-7, use_index=False):
     mean_stamps = []
     indices = []
     # saved = False
@@ -205,17 +212,18 @@ def create_stamps(im_datas, im_masks, c, cv, dmjds, rates,
         cv[0, 0, 0] = im_masks[0, 0, 0]
 
         # t1 = time.time()
-        w = np.where(np.round(filt_detections[:,2]).astype("int")==ir)
-        #if exact_check:
-        #    w = np.where((filt_detections[:, 2] == rates[ir][0]) &
-        #                 (filt_detections[:, 3] == rates[ir][1]))
-        #else:
-        #    w = np.where((np.isclose(filt_detections[:,2], 
-        #                             rates[ir][0], 
-        #                             rtol=inexact_rtol)) &
-        #                 (np.isclose(filt_detections[:,3], 
-        #                             rates[ir][1], 
-        #                             rtol=inexact_rtol)))
+        if use_index:
+            w = np.where(np.round(filt_detections[:,2]).astype("int")==ir)
+        elif exact_check:
+            w = np.where((filt_detections[:, 2] == rates[ir][0]) &
+                         (filt_detections[:, 3] == rates[ir][1]))
+        else:
+            w = np.where((np.isclose(filt_detections[:,2], 
+                                     rates[ir][0], 
+                                     rtol=inexact_rtol)) &
+                         (np.isclose(filt_detections[:,3], 
+                                     rates[ir][1], 
+                                     rtol=inexact_rtol)))
 
         for id in range(1, len(dmjds)):
             shifts = (-round(dmjds[id]*rates[ir][1]),
@@ -358,7 +366,7 @@ def predictive_line_cluster(filt_detections, stamps, dmjds, dist_lim,
 def position_filter(clust_detections, clust_stamps, im_datas,
                     inv_vars, c, cv, kernel,
                     dmjds, rates, khw, n_offsets=5,
-                    exact_check=True, inexact_rtol=1.e-7):
+                    exact_check=True, inexact_rtol=1.e-7, use_index=False):
 
     # now apply a positional filter on the clust_detections to see
     # if the likelihood minimimum is near the centre
@@ -383,17 +391,18 @@ def position_filter(clust_detections, clust_stamps, im_datas,
 
     keeps = []
     for ir in range(len(rates)):
-        #if exact_check:
-        #   w = np.where((clust_detections[:, 2] == rates[ir][0]) &
-        #                (clust_detections[:, 3] == rates[ir][1]))
-        #else:
-        #    w = np.where((np.isclose(clust_detections[:,2], 
-        #                             rates[ir][0], 
-        #                             rtol=inexact_rtol)) &
-        #                 (np.isclose(clust_detections[:,3], 
-        #                             rates[ir][1], 
-        #                             rtol=inexact_rtol)))
-        w = np.where(clust_detections[:, 2] == ir)
+        if use_index:
+            w = np.where(clust_detections[:, 2] == ir)
+        elif exact_check:
+           w = np.where((clust_detections[:, 2] == rates[ir][0]) &
+                        (clust_detections[:, 3] == rates[ir][1]))
+        else:
+            w = np.where((np.isclose(clust_detections[:,2], 
+                                 rates[ir][0], 
+                                 rtol=inexact_rtol)) &
+                         (np.isclose(clust_detections[:,3], 
+                                     rates[ir][1], 
+                                     rtol=inexact_rtol)))
         if len(w[0]) == 0:
             continue
 
@@ -446,7 +455,9 @@ def brightness_filter_fast(im_datas, inv_vars, c, cv, kernel,
                            dmjds, rates, detections, khw, n_im,
                            n_bright_test = 10, test_high = 1.15,
                            test_low = 0.85,
-                           exact_check=True, inexact_rtol=1.e-7, n_det_iter = 200):
+                           exact_check=True, inexact_rtol=1.e-7, 
+                           use_index=False,
+                           n_det_iter = 200):
 
     device = get_device()
 
@@ -471,16 +482,17 @@ def brightness_filter_fast(im_datas, inv_vars, c, cv, kernel,
     for ir in range(len(rates)):
 
         t1 = time.time()
-        W = np.where(detections[:,2]==ir)
-        # if exact_check:
-        #     W = np.where((detections[:,2]==rates[ir][0]) & (detections[:,3] == rates[ir][1]))
-        # else:
-        #     W = np.where((np.isclose(detections[:,2], 
-        #                              rates[ir][0], 
-        #                              rtol=inexact_rtol)) & 
-        #                  (np.isclose(detections[:,3], 
-        #                              rates[ir][1], 
-        #                              rtol=inexact_rtol)))
+        if use_index:
+            W = np.where(detections[:,2]==ir)
+        elif exact_check:
+            W = np.where((detections[:,2]==rates[ir][0]) & (detections[:,3] == rates[ir][1]))
+        else:
+            W = np.where((np.isclose(detections[:,2], 
+                                     rates[ir][0], 
+                                     rtol=inexact_rtol)) & 
+                         (np.isclose(detections[:,3], 
+                                     rates[ir][1], 
+                                     rtol=inexact_rtol)))
 
         if len(W[0])==0: continue
         
