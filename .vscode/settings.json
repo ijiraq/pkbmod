@@ -7,5 +7,5 @@
         },
         "editor.defaultFormatter": "charliermarsh.ruff"
     },
-    "flake8.enabled": false
+    "flake8.enabled": true
 }

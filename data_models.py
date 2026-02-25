@@ -1,17 +1,21 @@
 from astropy.io import fits
 from astropy.table import Table
 from astropy.wcs import WCS
+from dataclasses import dataclass, field, asdict
+import json
 from glob import glob
 import logging
+import numpy as np
 import re
+from typing import List
 
 
-def _read_flag_list(flags_fn) -> [str]:
+def read_flag_list_from_file(flags_fn) -> [str]:
     """Read the list of flags to mask
     """
     flag_keys = []
     with open(flags_fn) as han:
-        for line in han.readline():
+        for line in han.readlines():
             if line.startswith('#'):
                 continue
             key = line.split()[0]
@@ -41,38 +45,27 @@ class StackParams(object):
     use_negative_well: bool = True  # use the negative well for detection.
     variance_trim: float = 1.3  # factor above median variance to mask pixels
 
-    def save(self):
+    def save(self) -> None:
         logging.info(f"Saving params to {self.params_filename}")
         with open(self.params_filename, 'w+') as han:
             json.dump(asdict(self), han)
 
+    def __iter__(self) -> dict:
+        yield from asdict(self).items()
 
-@dataclass
-class DataLoad(object):
-    """All the data objects that will be needed by shift and stacking routine
 
-    stack_inputs becomes a dictionary holding the various data structures that
-    the shift-and-stack wants.  These are loaded into the correct format using
-    subroutines in the sns_data_nh.pack_data method.
-
-    """
-    warps: Dict[int, fits.HDUList]
-    psfs: Dict[int, fits.PrimaryHDU]
-    properties: Dict[int, List]
-    plants: np.array  # location of injecetd suorces in ref_im
-    results_filename: str  # file to save detections to
-    plant_matches_filename: str  # store matched plants here
-    bitmask: Dict[str, int]
-    scrambled: bool = False  # Time scrambled prefixclass ExtractedDataModel(object):
-
+class ExtractedDataModel(object):
     WCS_EXT = 1
     IMAGE_EXT = 1
     MASK_EXT = 2
     VARIANCE_EXT = 3
     MASK_PREFIX = "MP_"
+    MAX_PIX_VALUE = 8000
+    MIN_PIX_VALUE = -10000
+    VARIANCE_BITMASK = "SAT"
 
     def __init__(self, base_dir, collections, day_obs, chip, dataset_type,
-                 bitmask_filename=None, badflags: list[str] | str = ['BAD']):
+                 bitmask_filename=None):
         self.base_dir = base_dir
         self.collections = collections
         self.day_obs = day_obs
@@ -80,7 +73,6 @@ class DataLoad(object):
         self.dataset_type = dataset_type
         self.properties_dataset_type = "properties"
         self.bitmask_filename = bitmask_filename
-        self.badflags = badflags
         self._warps = None
         self._psfs = None
         self._properties = None
@@ -89,25 +81,92 @@ class DataLoad(object):
         self._ref_header = None
         self._bitmask = None
         self._plants = None
+        self._stack_inputs = None
+
+    # mask high, low, nan and inf pixels and
+    # remove images that are fully masked
+    def mask_variance(self, variance_trim) -> {'str': [np.array]}:
+        """set the var_trim_keyword mask to ON if data exceeds variance_trim
+        fraction of variance.
+
+        Args:
+            variance_trim (float): variance threshold fraction
+            var_trim_keyword (str, optional): mask string. Default 'SAT'
+        """
+        datas = self.stack_inputs['datas']
+        variances = self.stack_inputs['variances']
+        masks = self.stack_inputs['masks']
+        dmjds = self.stack_inputs['dmjds']
+        im_nums = self.stack_inputs['im_nums']
+        for idx in range(len(datas)):
+            w = np.where((np.isinf(variances[idx])) |
+                         (np.isinf(datas[idx])) |
+                         (np.isnan(datas[idx])) |
+                         (datas[idx] > self.MAX_PIX_VALUE) |
+                         (datas[idx] < self.MIN_PIX_VALUE))
+            masks[idx][w] |= 2**self.bitmask[self.VARIANCE_BITMASK]
+            variances[idx][w] = np.nan
+            datas[idx][w] = 0.0
+            nan_med_variance = np.nanmedian(variances[idx])
+            logging.debug((f"{im_nums[idx]} {dmjds[idx]} {nan_med_variance}"))
+            if np.isnan(nan_med_variance):
+                logging.debug('Skipping image {im_nums[idx]} due to nans.')
+                for key in self.stack_inputs:
+                    _ = self._stack_inputs[key].pop(idx)
+            else:
+                w = np.where(
+                    variances[idx] >
+                    variance_trim*nan_med_variance)
+                masks[idx][w] |= 2**self.bitmask[self.VARIANCE_BITMASK]
+
+    def pack_inputs(self) -> None:
+        """convert list of arrays in stack_inputs into 3d arrays
+
+        """
+        for key in ['datas', 'masks', 'variances',
+                    'dmjds', 'psfs', 'fwhms', 'im_nums']:
+            self.stack_inputs[key] = np.array(self.stack_inputs[key])
+        # im_nums should be int arrays
+        self.stack_inputs['im_nums'] = (
+            self.stack_inputs['im_nums'].astype('int'))
+        return self.stack_inputs
 
     @property
-    def badflags(self) -> [str]:
-        return self._badflags
-    
-    @badflags.setter
-    def badflags(self, badflags):
-        if isinstance(badflags, list):
-            self._badflags = badflags
-        # treate a string to laod from file
-        flag_keys = []
-        with open(badflags) as han:
-            for line in han.readlines():
-                if line.startswith('#'):
-                    continue
-                key = line.split()[0]
-                flag_keys.append(key)
-        logging.debug(f"FLAG_KEY: {flag_keys}")
-        self._badflags = flag_keys
+    def stack_inputs(self) -> {str: [np]}:
+        """ pack data into a dictionary of numpy arrays
+            for use in shift-and-stack code.
+        """
+        if self._stack_inputs is not None:
+            return self._stack_inputs
+        PSF_DATA_EXTNO = 0
+        DATA_EXTNO = 1
+        MASK_EXTNO = 2
+        VARIANCE_EXTNO = 3
+        datas, masks, variances = [], [], []
+        dmjds, psfs, fwhms, im_nums = [], [], [], []
+        logging.debug("Creating numpy data lists to pack data onto GPU with.")
+        for im_num in self.warps:
+            hdul = self.warps[im_num]
+            datas.append(hdul[DATA_EXTNO].data)
+            masks.append(hdul[MASK_EXTNO].data)
+            variances.append(hdul[VARIANCE_EXTNO].data)
+            dmjds.append(self.properties[im_num]['dmjd'])
+            fwhms.append(self.properties[im_num]['fwhm'])
+            psf_data = self.psfs[im_num][PSF_DATA_EXTNO].data
+            psfs.append(psf_data/np.sum(psf_data))
+            im_nums.append(im_num)
+        logging.debug(f"Using {len(datas)} images.")
+        self._stack_inputs = {
+            'datas': datas,
+            'masks': masks,
+            'variances': variances,
+            'dmjds': dmjds,
+            'psfs': psfs,
+            'fwhms': fwhms,
+            'im_nums': im_nums,
+            'plants': self.plants,
+            'bitmask': self.bitmask}
+        return self.stack_inputs
 
     @property
     def path(self):
@@ -123,7 +182,7 @@ class DataLoad(object):
     def visit_number_from_filename(self, filename) -> int:
         visit_re = re.compile('_([0-9]{6})_')
         return int(visit_re.search(filename).group(1))
-    
+
     @property
     def bitmask(self) -> {}:
         if self._bitmask is not None:
@@ -186,13 +245,13 @@ class DataLoad(object):
                       for x in filelist}
         logging.info(f"Loaded {len(self._psfs)} psfs")
         return self._psfs
-    
+
     @property
     def ref_header(self):
         if self._ref_header is None:
             self._ref_header = self.warps[self.ref_visit][self.WCS_EXT].header
         return self._ref_header
-    
+
     @property
     def ref_wcs(self):
         """Get the WCS of the reference visit"""

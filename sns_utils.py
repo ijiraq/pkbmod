@@ -22,7 +22,6 @@ def run_shifts(datas, inv_variances, rates, dmjds, min_snr,
     alpha_image = torch.zeros((1, 1,
                                len(rates), datas.size()[3], datas.size()[4]),
                               dtype=torch.float32)
-    
 
     # rates=[[-200.6777606841237, 78.88276756451387]]
     for ir in range(len(rates)):
@@ -82,7 +81,7 @@ def run_shifts(datas, inv_variances, rates, dmjds, min_snr,
     return snr_image, alpha_image
 
 
-def trim_negative_snr(snr_image, alpha_image, sort_inds, 
+def trim_negative_snr(snr_image, alpha_image, sort_inds,
                       n_keep, rates, A, B, use_index=False):
     # trim the negative SNR sources. The reason these show up is
     # because the likelihood formalism sucks
@@ -91,7 +90,6 @@ def trim_negative_snr(snr_image, alpha_image, sort_inds,
     idy = idy.reshape(A*B)
     for n in range(n_keep):
         s = sort_inds[0, 0, n, :, :].reshape(A*B)
-        logging.debug(f"Shape of s:{s.shape} and reshape: {s.reshape(A*B).shape}")
         SNR = snr_image[0, 0, s, idy, idx]
         alpha = alpha_image[0, 0, s, idy, idx]
 
@@ -200,7 +198,7 @@ def brightness_filter(im_datas, inv_vars, c, cv, kernel,
 
 
 def create_stamps(im_datas, im_masks, c, cv, dmjds, rates,
-                  filt_detections, khw, 
+                  filt_detections, khw,
                   exact_check=False, inexact_rtol=1.e-7, use_index=False):
     mean_stamps = []
     indices = []
@@ -213,16 +211,16 @@ def create_stamps(im_datas, im_masks, c, cv, dmjds, rates,
 
         # t1 = time.time()
         if use_index:
-            w = np.where(np.round(filt_detections[:,2]).astype("int")==ir)
+            w = np.where(np.round(filt_detections[:, 2]).astype("int") == ir)
         elif exact_check:
             w = np.where((filt_detections[:, 2] == rates[ir][0]) &
                          (filt_detections[:, 3] == rates[ir][1]))
         else:
-            w = np.where((np.isclose(filt_detections[:,2], 
-                                     rates[ir][0], 
+            w = np.where((np.isclose(filt_detections[:, 2],
+                                     rates[ir][0],
                                      rtol=inexact_rtol)) &
-                         (np.isclose(filt_detections[:,3], 
-                                     rates[ir][1], 
+                         (np.isclose(filt_detections[:, 3],
+                                     rates[ir][1],
                                      rtol=inexact_rtol)))
 
         for id in range(1, len(dmjds)):
@@ -394,14 +392,14 @@ def position_filter(clust_detections, clust_stamps, im_datas,
         if use_index:
             w = np.where(clust_detections[:, 2] == ir)
         elif exact_check:
-           w = np.where((clust_detections[:, 2] == rates[ir][0]) &
-                        (clust_detections[:, 3] == rates[ir][1]))
+            w = np.where((clust_detections[:, 2] == rates[ir][0]) &
+                         (clust_detections[:, 3] == rates[ir][1]))
         else:
-            w = np.where((np.isclose(clust_detections[:,2], 
-                                 rates[ir][0], 
-                                 rtol=inexact_rtol)) &
-                         (np.isclose(clust_detections[:,3], 
-                                     rates[ir][1], 
+            w = np.where((np.isclose(clust_detections[:, 2],
+                                     rates[ir][0],
+                                     rtol=inexact_rtol)) &
+                         (np.isclose(clust_detections[:, 3],
+                                     rates[ir][1],
                                      rtol=inexact_rtol)))
         if len(w[0]) == 0:
             continue
@@ -453,16 +451,16 @@ def position_filter(clust_detections, clust_stamps, im_datas,
 
 def brightness_filter_fast(im_datas, inv_vars, c, cv, kernel,
                            dmjds, rates, detections, khw, n_im,
-                           n_bright_test = 10, test_high = 1.15,
-                           test_low = 0.85,
-                           exact_check=True, inexact_rtol=1.e-7, 
+                           n_bright_test=10, test_high=1.15,
+                           test_low=0.85,
+                           exact_check=True, inexact_rtol=1.e-7,
                            use_index=False,
-                           n_det_iter = 200):
+                           n_det_iter=200):
 
     device = get_device()
 
-    nb_ref = torch.tensor(10.0**np.linspace(np.log10(test_low), 
-                                            np.log10(test_high), 
+    nb_ref = torch.tensor(10.0**np.linspace(np.log10(test_low),
+                                            np.log10(test_high),
                                             n_bright_test)).to(device)
 
     ks = 2 * khw  # kernel spatial size
@@ -470,7 +468,8 @@ def brightness_filter_fast(im_datas, inv_vars, c, cv, kernel,
     # k_unit[ib] = kernel * nb_ref[ib]
     kern = kernel[0, 0]  # (n_im, ks, ks)
     # Wes added None and None to the front of each index selection
-    k_unit = kern[None, None, :, :, :] * nb_ref[None, :, None, None, None]  # (n_bright_test, n_im, ks, ks)
+    # (n_bright_test, n_im, ks, ks)
+    k_unit = kern[None, None, :, :, :] * nb_ref[None, :, None, None, None]
 
     # Precompute patch offset indices (reused every rate iteration)
     dy = torch.arange(ks, device=device)
@@ -483,41 +482,49 @@ def brightness_filter_fast(im_datas, inv_vars, c, cv, kernel,
 
         t1 = time.time()
         if use_index:
-            W = np.where(detections[:,2]==ir)
+            W = np.where(detections[:, 2] == ir)
         elif exact_check:
-            W = np.where((detections[:,2]==rates[ir][0]) & (detections[:,3] == rates[ir][1]))
+            W = np.where((detections[:, 2] == rates[ir][0]) &
+                         (detections[:, 3] == rates[ir][1]))
         else:
-            W = np.where((np.isclose(detections[:,2], 
-                                     rates[ir][0], 
-                                     rtol=inexact_rtol)) & 
-                         (np.isclose(detections[:,3], 
-                                     rates[ir][1], 
+            W = np.where((np.isclose(detections[:, 2],
+                                     rates[ir][0],
+                                     rtol=inexact_rtol)) &
+                         (np.isclose(detections[:, 3],
+                                     rates[ir][1],
                                      rtol=inexact_rtol)))
 
-        if len(W[0])==0: continue
-        
+        if len(W[0]) == 0:
+            continue
+
         # Roll images for this rate
         for id in range(1, n_im):
-            shifts = (-round(dmjds[id]*rates[ir][1]), -round(dmjds[id]*rates[ir][0]))
-            c[0,0,id]  = torch.roll(im_datas[0,0,id], shifts=shifts, dims=[0,1])
-            cv[0,0,id] = torch.roll(inv_vars[0,0,id], shifts=shifts, dims=[0,1])
+            shifts = (-round(dmjds[id]*rates[ir][1]),
+                      -round(dmjds[id]*rates[ir][0]))
+            c[0, 0, id] = torch.roll(im_datas[0, 0, id],
+                                     shifts=shifts,
+                                     dims=[0, 1])
+            cv[0, 0, id] = torch.roll(inv_vars[0, 0, id],
+                                      shifts=shifts,
+                                      dims=[0, 1])
 
         n_done_iter = 0
         while n_done_iter < len(W[0])-1:
-            
+
             w = W[0][n_done_iter:min(n_done_iter+n_det_iter, len(W[0]))]
 
             det_idx = w
             n_det = len(det_idx)
-            
             if n_det == 0:
                 continue
 
             # Extract coordinates for all detections at this rate
             xs = detections[det_idx, 0].astype(int) + khw
             ys = detections[det_idx, 1].astype(int) + khw
-            fluxes = torch.tensor(detections[det_idx, 4], dtype=torch.float64, device=device)
-            
+            fluxes = torch.tensor(detections[det_idx, 4],
+                                  dtype=torch.float64,
+                                  device=device)
+
             # Batch-extract all patches via advanced indexing
             c_3d = c[0, 0]    # (n_im, H, W)
             cv_3d = cv[0, 0]  # (n_im, H, W)
@@ -532,38 +539,51 @@ def brightness_filter_fast(im_datas, inv_vars, c, cv, kernel,
             y_exp = y_idx[:, None, :, None].expand(n_det, n_im, ks, ks)
             x_exp = x_idx[:, None, None, :].expand(n_det, n_im, ks, ks)
             im_exp = im_idx[None, :, None, None].expand(n_det, n_im, ks, ks)
-            
-            patches_c  = c_3d[im_exp, y_exp, x_exp]   # (n_det, n_im, ks, ks)
-            patches_cv = cv_3d[im_exp, y_exp, x_exp]   # (n_det, n_im, ks, ks)
-            
-            # Exploit argmin scale-invariance: argmin((p - k*f)^2 * w) == argmin((p/f - k)^2 * w)
-            # Divide patches by flux (scalar per detection) instead of scaling k_unit by flux.
-            # k_unit is (n_bright_test, n_im, ks, ks) — shared across detections, NOT (n_det, n_bright_test, ...).
-            # Guard against non-positive flux (should not happen after trim_negative_flux).
-            safe_fluxes = fluxes.clone()
-            safe_fluxes[safe_fluxes <= 0] = 1.0  # fallback; won't pass filter anyway
 
+            patches_c = c_3d[im_exp, y_exp, x_exp]   # (n_det, n_im, ks, ks)
+            patches_cv = cv_3d[im_exp, y_exp, x_exp]   # (n_det, n_im, ks, ks)
+
+            # Exploit argmin scale-invariance:
+            # argmin((p - k*f)^2 * w) == argmin((p/f - k)^2 * w)
+            # Divide patches by flux (scalar per detection) instead
+            # of scaling k_unit by flux.
+            # k_unit is (n_bright_test, n_im, ks, ks) — shared
+            # across detections, NOT (n_det, n_bright_test, ...).
+            # Guard against non-positive flux (should not happen after
+            # trim_negative_flux).
+            safe_fluxes = fluxes.clone()
+            # fallback; won't pass filter anyway
+            safe_fluxes[safe_fluxes <= 0] = 1.0
 
             # Wilson's version
-            patches_c_norm = patches_c / safe_fluxes[:, None, None, None]  # (n_det, n_im, ks, ks)            
-            # Broadcasting: (n_det,1,n_im,ks,ks) - (1,n_bright_test,n_im,ks,ks) -> (n_det,n_bright_test,n_im,ks,ks)
-            diff = patches_c_norm[:, None, :, :, :] - k_unit[None, :, :, :, :] # instead of [None, :, :, :, :]
-            logging.debug(f"Taking the square of difference of size {diff.shape}")
+            # (n_det, n_im, ks, ks)
+            patches_c_norm = patches_c / safe_fluxes[:, None, None, None]
+            # Broadcasting:
+            # (n_det,1,n_im,ks,ks) - (1,n_bright_test,n_im,ks,ks) ->
+            #          (n_det,n_bright_test,n_im,ks,ks)
+            # instead of [None, :, :, :, :]
+            diff = patches_c_norm[:, None, :, :, :] - k_unit[None, :, :, :, :]
             diff = diff * diff
-            diff = diff * patches_cv[:, None, :, :, :]  # (n_det, n_bright_test, n_im, ks, ks)
+            # (n_det, n_bright_test, n_im, ks, ks)
+            diff = diff * patches_cv[:, None, :, :, :]
+            """
+            # using kernel*f like below results the same
+            # as wilson's version above.
+            # patches_c = patches_c  # (n_det, n_im, ks, ks)
+            # Broadcasting:
+            # (n_det,1,n_im,ks,ks) - (1,n_bright_test,n_im,ks,ks)
+            #                    -> (n_det,n_bright_test,n_im,ks,ks)
+            # instead of [None, :, :, :, :]
+            diff = patches_c[:, None, :, :, :] - k_unit[None, :, :, :, :] *
+                        safe_fluxes[:, None, None,None, None]
+            diff = diff * diff
+             # (n_det, n_bright_test, n_im, ks, ks)
+            diff = diff * patches_cv[:, None, :, :, :]
+            """
+            tmp_l = diff.sum(dim=(3, 4, 5))[0]  # (n_det, n_bright_test)
+            arg_mins = torch.argmin(tmp_l, dim=1).cpu().numpy()  # (n_det,)
 
-            """
-            # using kernel*f like below results the same as wilson's version above.
-            # patches_c = patches_c  # (n_det, n_im, ks, ks)            
-            # Broadcasting: (n_det,1,n_im,ks,ks) - (1,n_bright_test,n_im,ks,ks) -> (n_det,n_bright_test,n_im,ks,ks)
-            diff = patches_c[:, None, :, :, :] - k_unit[None, :, :, :, :]*safe_fluxes[:, None, None,None, None] # instead of [None, :, :, :, :]
-            diff = diff * diff
-            diff = diff * patches_cv[:, None, :, :, :]  # (n_det, n_bright_test, n_im, ks, ks)
-            """
-            l = diff.sum(dim=(3, 4, 5))[0]  # (n_det, n_bright_test)
-            arg_mins = torch.argmin(l, dim=1).cpu().numpy()  # (n_det,)
-            
-            # Filter: keep detections whose best brightness is not at the boundary
+            # Filter: keep detections if best brightness not at the boundary
             valid = (arg_mins != 0) & (arg_mins != (n_bright_test - 1))
 
             if n_done_iter == 0:
@@ -575,16 +595,23 @@ def brightness_filter_fast(im_datas, inv_vars, c, cv, kernel,
             del diff
             gc.collect()
 
-            logging.info(f'{ir+1}/{len(rates)}, vx: {str(rates[ir][0])[:7]}, vy: {str(rates[ir][1])[:7]}, pre: {len(W[0])}, post: {len(kept_idx)},  in time {time.time()-t1}')
+            logging.info((f'{ir+1}/{len(rates)}, '
+                          f'vx: {str(rates[ir][0])[:7]}, '
+                          f'vy: {str(rates[ir][1])[:7]}, '
+                          f'pre: {len(W[0])}, '
+                          f'post: {len(kept_idx)},  '
+                          f'in time {time.time()-t1}'))
 
         if len(kept_idx) > 0:
             keeps_list.append(kept_idx)
+    if keeps_list:
+        keeps = np.concatenate(keeps_list)
+    else:
+        keeps = np.array([], dtype=np.intp)
 
-    keeps = np.concatenate(keeps_list) if keeps_list else np.array([], dtype=np.intp)
-
-    logging.info(f'Number kept after brightness filter {len(keeps)} of {len(detections)} total detections.')
-    print(f'Number kept after brightness filter {len(keeps)} of {len(detections)} total detections.')
+    logging.info((f'Number kept after brightness filter {len(keeps)} '
+                  f'of {len(detections)} total detections.'))
+    print((f'Number kept after brightness filter {len(keeps)} '
+           f'of {len(detections)} total detections.'))
 
     return keeps
-
-

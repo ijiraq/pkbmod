@@ -1,4 +1,3 @@
-from astropy.io import fits
 from astropy.table import Table
 import logging
 import numpy as np
@@ -8,9 +7,6 @@ import torch
 NOMINAL_PIXEL_SCALE = 0.17  # arcsec/pixel
 MAX_SHIFT_RATE = 4.5  # arcsec/hour
 MAX_RATE_PIX_PER_DAY = 24*MAX_SHIFT_RATE/NOMINAL_PIXEL_SCALE
-MAX_PIX_VALUE = 8000
-MIN_PIX_VALUE = -10000
-VARIANCE_BITMASK = "SAT"
 
 
 def get_device() -> torch.device:
@@ -25,92 +21,12 @@ def get_device() -> torch.device:
     return torch.device("cuda:0" if gpu_available else "cpu")
 
 
-def pack_data(warp_dict: {int: fits.HDUList},
-              psf_dict: {int: fits.HDUList},
-              properties: {int: []}) -> {'str': [np.array]}:
-    """
-    Given  ofdictionaries containing fits.HDULists mapped by image number
-    and a dictionary of properties of each image
-    extract out the members needed for shift-and-stack and pack them
-    into ordered lists for passing into the shift-and-stack codes.
-    """
-    PSF_DATA_EXTNO = 0
-    DATA_EXTNO = 1
-    MASK_EXTNO = 2
-    VARIANCE_EXTNO = 3
-    datas, masks, variances = [], [], []
-    dmjds, psfs, fwhms, im_nums = [], [], [], []
-    logging.debug(f"Creating numpy data lists to pack data onto GPU with.")
-    for im_num in warp_dict:
-        hdul = warp_dict[im_num]
-        datas.append(hdul[DATA_EXTNO].data)
-        masks.append(hdul[MASK_EXTNO].data)
-        variances.append(hdul[VARIANCE_EXTNO].data)
-        dmjds.append(properties[im_num][0])
-        fwhms.append(properties[im_num][1])
-        psf_data = psf_dict[im_num][PSF_DATA_EXTNO].data
-        psfs.append(psf_data/np.sum(psf_data))
-        im_nums.append(im_num)
-    logging.debug(f"Using {len(datas)} images.")
-    return {'datas': datas,
-            'masks': masks,
-            'variances': variances,
-            'dmjds': dmjds,
-            'psfs': psfs,
-            'fwhms': fwhms,
-            'im_nums': im_nums}
-
-
-def mask_variance(stack_inputs,
-                  bitmask,
-                  variance_trim,
-                  var_trim_keyword=VARIANCE_BITMASK) -> {'str': [np.array]}:
-    """set the var_trim_keyword mask to ON if data exceeds variance_trim
-    fraction of variance.
-
-    Args:
-        datas (np.array): numpy array holding the data to mask
-        masks (np.array): numpy array with data masks
-        variances (np.array): numpy array with variances
-        bit_mask ({str: int}): values of bits corresponding to mask strnig
-        variance_trim (float): variance threshold fraction
-        var_trim_keyword (str, optional): mask string. Default 'SAT'
-    """
-    datas = stack_inputs['datas']
-    variances = stack_inputs['variances']
-    masks = stack_inputs['masks']
-    dmjds = stack_inputs['dmjds']
-    im_nums = stack_inputs['im_nums']
-    for idx in range(len(datas)):
-        w = np.where((np.isinf(variances[idx])) |
-                     (np.isinf(datas[idx])) |
-                     (np.isnan(datas[idx])) |
-                     (datas[idx] > MAX_PIX_VALUE) |
-                     (datas[idx] < MIN_PIX_VALUE))
-        masks[idx][w] |= 2**bitmask[var_trim_keyword]
-        variances[idx][w] = np.nan
-        datas[idx][w] = 0.0
-        nan_med_variance = np.nanmedian(variances[idx])
-        logging.debug((f"{im_nums[idx]} {dmjds[idx]} {nan_med_variance}"))
-        if np.isnan(nan_med_variance):
-            logging.debug('Skipping image {im_nums[idx]} due to nans.')
-            for key in stack_inputs:
-                _ = stack_inputs[key].pop(idx)
-        else:
-            w = np.where(
-                variances[idx] >
-                variance_trim*nan_med_variance)
-            masks[idx][w] |= 2**bitmask[var_trim_keyword]
-    return stack_inputs
-
-
-def get_shift_rates(plants: Table, 
+def get_shift_rates(plants: Table,
                     fwhms: np.array,
                     dmjds: np.array,
                     rate_fwhm_grid_step: float):
     """
     get a grid of shift rates from the plant list
-    
     """
     # rotation hack because the chip 24 rates are
     # all positive in x not negative

@@ -1,11 +1,8 @@
-from dataclasses import dataclass, field, asdict
 import gc
-import json
 import logging
 import numpy as np
 from torch.nn import functional
 import torch
-from typing import Dict, List
 
 import sns_data_nh as data
 import sns_utils as utils
@@ -14,31 +11,18 @@ EXTENSION_WITH_WCS = 1
 VARIANCE_MASK = 'VARIANCE'
 
 
-def run(dataload: DataLoad, stackparams: StackParams):
+def run(stack_inputs: dict, stack_params: dict,
+        results_filename: str, plant_matches_filename: str):
     """Given the data load and stacking parameters run the shift-and-stack
     search.
 
     Args:
-        dataload (DataLoad): diffs, masks, variance, psfs, plants, etc
-        stackparams (StackParams): parameters to use for the sns search
+        stack_inputs (dict): dictionary of np.arrays for stacking: datas, etc.
+        stack_params (dict): parameters to use for the sns search
     """
     # this routine is setup to store the index in the detection tensor rather
     # than the rates.
     use_index = True
-    # mask high, low, nan and inf pixels and
-    # remove images that are fully masked
-    stack_inputs = data.pack_data(dataload.warps,
-                                  dataload.psfs,
-                                  dataload.properties)
-    stack_inputs = data.mask_variance(stack_inputs, 
-                                      bitmask=dataload.bitmask,
-                                      variance_trim=stackparams.variance_trim)
-
-    # convert all stack_inputs into numpy arrays
-    for key in stack_inputs:
-        stack_inputs[key] = np.array(stack_inputs[key])
-    # im_nums should be int arrays
-    stack_inputs['im_nums'] = stack_inputs['im_nums'].astype('int')
 
     # now map to the array variables used in rest of code
     datas = stack_inputs['datas']
@@ -48,26 +32,25 @@ def run(dataload: DataLoad, stackparams: StackParams):
     fwhms = stack_inputs['fwhms']
     im_nums = stack_inputs['im_nums']
     psfs = stack_inputs['psfs']
-    plants = dataload.plants
-    results_filename = dataload.results_filename
-    plant_matches_filename = dataload.plant_matches_filename
-    bitmask = dataload.bitmask
+    plants = stack_inputs['plants']
+    results_filename = results_filename
+    bitmask = stack_inputs['bitmask']
 
-    # now define the parameters based on stackparams object.
-    badflags = stackparams.badflags
-    rate_fwhm_grid_step = stackparams.rate_fwhm_grid_step
-    n_keep = stackparams.n_keep
-    kernel_width = stackparams.kernel_width
+    # now define the parameters based on stackparams dictionary.
+    badflags = stack_params['badflags']
+    rate_fwhm_grid_step = stack_params['rate_fwhm_grid_step']
+    n_keep = stack_params['n_keep']
+    kernel_width = stack_params['kernel_width']
     khw = kernel_width//2
-    use_gaussian_kernel = stackparams.use_gaussian_kernel
-    use_negative_well = stackparams.use_negative_well
-    peak_offset_max = stackparams.peak_offset_max
-    dist_lim = stackparams.dist_lim
-    min_samp = stackparams.min_samp
-    min_snr = stackparams.min_snr
-    trim_snr = stackparams.trim_snr
-    dist_max = stackparams.dist_max
-    dist_rate_max = stackparams.dist_rate_max
+    use_gaussian_kernel = stack_params['use_gaussian_kernel']
+    use_negative_well = stack_params['use_negative_well']
+    peak_offset_max = stack_params['peak_offset_max']
+    dist_lim = stack_params['dist_lim']
+    min_samp = stack_params['min_samp']
+    min_snr = stack_params['min_snr']
+    trim_snr = stack_params['trim_snr']
+    dist_max = stack_params['dist_max']
+    dist_rate_max = stack_params['dist_rate_max']
 
     rates = data.get_shift_rates(
         plants=plants,
@@ -75,7 +58,8 @@ def run(dataload: DataLoad, stackparams: StackParams):
         dmjds=dmjds,
         rate_fwhm_grid_step=rate_fwhm_grid_step)
 
-    logging.debug(f"Creating the convolution kernel: Use Guassian:{use_gaussian_kernel}")
+    logging.debug(("Creating the convolution kernel:"
+                   f" Use Guassian:{use_gaussian_kernel}"))
     kernel = data.create_kernel(
         psfs=psfs,
         dmjds=dmjds,
@@ -156,7 +140,7 @@ def run(dataload: DataLoad, stackparams: StackParams):
                             dtype=torch.int64, device='cpu')
     logging.debug(f'Packing {snr_image.shape} into {sort_inds.shape}')
 
-    # sort on the SNR index (2) and select the top n_keep 
+    # sort on the SNR index (2) and select the top n_keep
     # these shift rates of those top SNR are selected as the detection
     sort_step = 1000
     a = 0
@@ -198,11 +182,11 @@ def run(dataload: DataLoad, stackparams: StackParams):
     cv = torch.zeros_like(im_datas)
     cv[0, 0, 0] = inv_vars[0, 0, 0]
 
-    keeps = utils.brightness_filter_fast(im_datas, inv_vars, c, cv, kernel, dmjds,
-                                         rates, detections, khw, n_im,
+    keeps = utils.brightness_filter_fast(im_datas, inv_vars, c, cv, kernel,
+                                         dmjds, rates, detections, khw, n_im,
                                          n_bright_test=10,
                                          test_high=1.15,
-                                         test_low=0.85, 
+                                         test_low=0.85,
                                          exact_check=False,
                                          use_index=use_index)
 
@@ -290,8 +274,8 @@ def run(dataload: DataLoad, stackparams: StackParams):
                        (plants['y0'][i] - det[:, 1])**2)
             # lookup the rate in the rates array if use_index
             if use_index:
-                rx = rates[round(det[:, 2]).astype("int"), 0]
-                ry = rates[round(det[:, 2]).astype("int"), 1]
+                rx = rates[np.round(det[:, 2]).astype("int"), 0]
+                ry = rates[np.round(det[:, 2]).astype("int"), 1]
             else:
                 rx = final_detections[:, 2]
                 ry = final_detections[:, 3]
@@ -322,11 +306,9 @@ def run(dataload: DataLoad, stackparams: StackParams):
             else:
                 rx = final_detections[i, 2]
                 ry = final_detections[i, 3]
-            (x, y, rx, ry, f, snr) = (final_detections[i, 0],
-                                      final_detections[i, 1], 
-                                      rx, 
-                                      ry,
-                                      final_detections[i, 4],
-                                      final_detections[i, 5])
-            row = {"snr": snr, "x": x, "y": y, "x_v": rx, "y_v": ry}
-            han.write(" ".join([f"{key}: {row[key]}" for key in row])+"\n")
+            (x, y, f, snr) = (final_detections[i, 0],
+                              final_detections[i, 1],
+                              final_detections[i, 4],
+                              final_detections[i, 5])
+            row = f'snr: {snr} flux: {f} x: {x} y: {y} x_v: {rx} y_v: {ry}\n'
+            han.write(row)

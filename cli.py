@@ -4,8 +4,10 @@ import logger
 import os
 import textwrap
 
-from stack import DataLoad, StackParams, run
-from data_models import ExtractedDataModel, StackParams, DataLoad
+from data_models import ExtractedDataModel
+from data_models import StackParams
+from data_models import read_flag_list_from_file
+from stack import run
 
 APP_NAME = 'pkbmod'
 EXTENSION_WITH_WCS = 1
@@ -31,37 +33,55 @@ def main():
                               '(ommit to read keys from mask extension.)'))
     parser.add_argument('--flagkeys', default='flagkeys_nh.dat', type=str,
                         help='File with list of keys to mask.')
-    parser.add_argument('--clust-dist-lim', default=4.0, 
-                        help="maximum distance between candidate and linear motion line in clustering routine", 
-                        type=float)
-    parser.add_argument('--clust-min-samp',
-                        help="minimum number of clustered detections required", 
-                        default=2, type=int)
+    parser.add_argument(
+        '--clust-dist-lim',
+        default=4.0,
+        help="maximum distance between candidate and linear motion",
+        type=float)
+    parser.add_argument(
+        '--clust-min-samp',
+        default=2,
+        type=int,
+        help="minimum number of clustered detections required")
     parser.add_argument('--dontUseNegativeWell',
-                        help="Use negative well as detection criterion",
+                        action='store_true',
                         default=False,
-                        action='store_true')
-    parser.add_argument('--kernel-width', help="Width of the psf kernel", 
-                        default=15, type=int)
-    parser.add_argument('--min_snr', help="Minimum SNR to be considered a detection",
-                        default=4.5, type=float)
-    parser.add_argument('--trim-snr', help="Trim candidates with SNR below this value, after clustering",
-                        default=5.5, type=float)
-    parser.add_argument('--n-keep', help="For each pixel keep the n-keep highest SNR detections for further filtering.",
-                        default=4, type=int)
-    parser.add_argument('--peak-offset-max', 
-                        help="max distance between peak and centre of stamp",
-                        default=4.0, type=float)
-    parser.add_argument('--rate_fwhm_grid_step',
-                        help="width of rate grid steps in units of FWHM",
-                        default=0.75, type=float)
-    parser.add_argument('--read-from-params', action='store_true',
-                        default=False,
-                        help=(f'Read from ROOT_DIR/{APP_NAME}/params.txt and '
-                              'ignore command line inputs'))
-    parser.add_argument('--use-gaussian-kernel', action='store_true',
-                        help="Don't use a PSF model file, build kernel using guassian.",
-                        default=False)
+                        help="Use negative well as detection criterion")
+    parser.add_argument('--kernel-width',
+                        type=int,
+                        default=15,
+                        help="Width of the psf kernel",)
+    parser.add_argument('--min_snr',
+                        type=float,
+                        default=4.5,
+                        help="Minimum SNR to be considered a detection")
+    parser.add_argument(
+        '--trim-snr',
+        help="After clustering, trim candidates with SNR below this value",
+        default=5.5, type=float)
+    parser.add_argument(
+        '--n-keep',
+        help="For each pixel examine the n-keep rates with highest SNR",
+        default=4, type=int)
+    parser.add_argument(
+        '--peak-offset-max',
+        help="max distance between peak and centre of stamp",
+        default=4.0, type=float)
+    parser.add_argument(
+        '--rate_fwhm_grid_step',
+        help="width of rate grid steps in units of FWHM",
+        default=0.75, type=float)
+    parser.add_argument(
+        '--read-from-params',
+        action='store_true',
+        default=False,
+        help=(f'Read from ROOT_DIR/{APP_NAME}/params.txt and '
+              'ignore command line inputs'))
+    parser.add_argument(
+        '--use-gaussian-kernel',
+        action='store_true',
+        default=False,
+        help="Don't use a PSF model file, build kernel using guassian.")
     parser.add_argument('--variance-trim', default=1.3, type=float,
                         help="factor above median variance to mask pixels",
                         )
@@ -73,8 +93,8 @@ def main():
                         default='DIFFS',
                         help="Sub-directory of BASER_DIR with warps to stack")
     parser.add_argument('--dataset-type', type=str,
-                        help="dataset type of difference images to stack",
-                        default="diff_directWarp")
+                        default="diff_directWarp",
+                        help="dataset type of difference images to stack")
     parser.add_argument(
         '--base-dir',
         default='/arc/projects/NewHorizons/HSC_2024',
@@ -94,8 +114,8 @@ def main():
     dataset_type = args.dataset_type
     day_obs = args.day_obs
     chip = args.chip
-    bitmask = args.bitmask
-    flagkeys = args.flagkeys
+    bitmask_filename = args.bitmask
+    flaglist_filename = args.flagkeys
 
     path = "/".join([base_dir,
                      f"{rt}{APP_NAME}",
@@ -114,37 +134,36 @@ def main():
     logging.info(f"Saving parameters to {params_filename}")
     logging.info(f"Saving results to {results_filename}")
     logging.info(f"Saving matched plants to {plants_match_filename}")
+    
+    badflags = read_flag_list_from_file(flaglist_filename)
+
+    # Stacking Parameters
+    stack_params = StackParams(params_filename)
+    stack_params.use_negative_well = not args.dontUseNegativeWell
+    stack_params.min_snr = args.min_snr
+    stack_params.rate_fwhm_grid_step = args.rate_fwhm_grid_step
+    stack_params.n_keep = args.n_keep
+    stack_params.dist_lim = args.clust_dist_lim
+    stack_params.min_samp = args.clust_min_samp
+    stack_params.trim_snr = args.trim_snr
+    stack_params.dist_lim_x = 4
+    stack_params.dist_lim_y = 6
+    stack_params.peak_offset_max = args.peak_offset_max
+    stack_params.variance_trim = args.variance_trim
+    stack_params.badflags = badflags
+    stack_params.save()
 
     data_model = ExtractedDataModel(base_dir, collections,
                                     day_obs, chip, dataset_type,
-                                    bitmask, flagkeys)
+                                    bitmask_filename=bitmask_filename)
 
-    dataload = DataLoad(
-        warps=data_model.warps,
-        psfs=data_model.psfs,
-        properties=data_model.properties,
-        plants=data_model.plants,
+    data_model.mask_variance(stack_params.variance_trim)
+    data_model.pack_inputs()
+
+    run(stack_inputs=data_model.stack_inputs,
+        stack_params=dict(stack_params),
         results_filename=results_filename,
-        bitmask=data_model.bitmask,
         plant_matches_filename=plants_match_filename)
-
-    # Stacking Parameters
-    stackparams = StackParams(params_filename)
-    stackparams.use_negative_well = not args.dontUseNegativeWell
-    stackparams.min_snr = args.min_snr
-    stackparams.rate_fwhm_grid_step = args.rate_fwhm_grid_step
-    stackparams.n_keep = args.n_keep
-    stackparams.dist_lim = args.clust_dist_lim
-    stackparams.min_samp = args.clust_min_samp
-    stackparams.trim_snr = args.trim_snr
-    stackparams.dist_lim_x = 4
-    stackparams.dist_lim_y = 6
-    stackparams.peak_offset_max = args.peak_offset_max
-    stackparams.variance_trim = args.variance_trim
-    stackparams.badflags = data_model.badflags
-    stackparams.save()
-
-    run(dataload=dataload, stackparams=stackparams)
 
 
 if __name__ == '__main__':
