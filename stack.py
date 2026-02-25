@@ -1,4 +1,3 @@
-from astropy.io import fits
 from dataclasses import dataclass, field, asdict
 import gc
 import json
@@ -13,59 +12,6 @@ import sns_utils as utils
 
 EXTENSION_WITH_WCS = 1
 VARIANCE_MASK = 'VARIANCE'
-
-
-@dataclass
-class StackParams(object):
-    params_filename: str  # filename to save parameters to
-    badflags: List[str] = field(default_factory=list)  # bad flags
-    dist_lim: float = 5.0  # candidate-line distance in clustering routine
-    dist_lim_x: int = 4  # maximum cluster distance in x
-    dist_lim_y: int = 6  # maximum cluster distance in y
-    dist_max: float = 4.0  # maximum spatial sep planted/detected link
-    dist_rate_max: float = 60.0  # maximum rate sep  for plan/detected link
-    kernel_width: int = 14  # width of kernel in pixels
-    min_samp: int = 3  # minimum number of clustered detections required
-    min_snr: float = 4.5  # Minimum SNR for a detection
-    n_keep: int = 10000  # number of sources to keep after initial serach
-    peak_offset_max: float = 4  # max distance between peak and centre of stamp
-    rate_fwhm_grid_step: float = 0.75  # width of steps in units of FWHM
-    trim_snr: float = 5.5  # min SNR of sources to keep after clustering
-    use_gaussian_kernel: bool = False  # use a guassian kernel instead of a PSF
-    use_negative_well: bool = True  # use the negative well for detection.
-    variance_trim: float = 1.3  # factor above median variance to mask pixels
-
-    def save(self):
-        logging.info(f"Saving params to {self.params_filename}")
-        with open(self.params_filename, 'w+') as han:
-            json.dump(asdict(self), han)
-
-
-@dataclass
-class DataLoad(object):
-    """All the data objects that will be needed by shift and stacking routine
-
-    stack_inputs becomes a dictionary holding the various data structures that
-    the shift-and-stack wants.  These are loaded into the correct format using
-    subroutines in the sns_data_nh.pack_data method.
-
-    """
-    warps: Dict[int, fits.HDUList]
-    psfs: Dict[int, fits.PrimaryHDU]
-    properties: Dict[int, List]
-    plants: np.array  # location of injecetd suorces in ref_im
-    results_filename: str  # file to save detections to
-    plant_matches_filename: str  # store matched plants here
-    bitmask: Dict[str, int]
-    scrambled: bool = False  # Time scrambled prefix
-
-
-def oom_observer(device, alloc, device_alloc, device_free):
-    logging.debug("Out of memory! Saving snapshot...")
-    snapshot = torch.cuda.memory._snapshot()
-    from pickle import dump
-    with open('oom_snapshot.pkl', 'wb') as f:
-        dump(snapshot, f)
 
 
 def run(dataload: DataLoad, stackparams: StackParams):

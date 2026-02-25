@@ -5,7 +5,7 @@ import os
 import textwrap
 
 from stack import DataLoad, StackParams, run
-from data_models import ExtractedDataModel
+from data_models import ExtractedDataModel, StackParams, DataLoad
 
 APP_NAME = 'pkbmod'
 EXTENSION_WITH_WCS = 1
