@@ -1,4 +1,3 @@
-from astropy.io import fits
 import gc
 import logging
 import numpy as np
@@ -7,8 +6,8 @@ import torch
 from sns_data_nh import get_device
 
 
-def run_shifts(datas, inv_variances, rates, dmjds, min_snr,
-               writeTestImages=False):
+def run_shifts(datas, inv_variances, rates, dmjds, min_snr, n_keep=4,
+               writeTestImages=False, tile_w=256, word_dtype=torch.float32):
     n_im = len(datas[0, 0, :])
     logging.debug(f'NUM IM {n_im}')
     c = torch.zeros_like(datas)
@@ -65,11 +64,6 @@ def run_shifts(datas, inv_variances, rates, dmjds, min_snr,
 
         gc.collect()
         torch.cuda.empty_cache()
-
-        # wes testing
-        if ir == 19 and writeTestImages:
-            fits.PrimaryHDU(np.array(nu.cpu())
-                            ).writeto('snr_test.fits', overwrite=True)
 
     logging.info(f'Max per image flux of candidates: {torch.max(alpha_image)}')
     logging.info(f'Max per image snr of candidates: {torch.max(snr_image)}')
@@ -440,11 +434,13 @@ def position_filter(clust_detections, clust_stamps, im_datas,
     keeps = np.array(keeps)
     grid_detections = clust_detections[keeps]
     grid_stamps = clust_stamps[keeps]
-    logging.debug(len(grid_detections), len(clust_detections))
-    logging.debug(grid_detections[0])
-    logging.debug(clust_detections[0])
-    logging.info((f'Number of sources kept after the positional'
-                  f' grid minimum search: {len(grid_detections)}.'))
+    logging.debug(f"First grid {grid_detections[0]}")
+    logging.debug(f"First cluster detection {clust_detections[0]}")
+    logging.info(('Number of sources kept after the cluster '
+                  f'filtering: {len(clust_detections)}.'))
+
+    logging.info(('Number of sources kept after the positional '
+                  f'grid minimum search: {len(grid_detections)}.'))
 
     return grid_detections, grid_stamps
 
@@ -611,7 +607,145 @@ def brightness_filter_fast(im_datas, inv_vars, c, cv, kernel,
 
     logging.info((f'Number kept after brightness filter {len(keeps)} '
                   f'of {len(detections)} total detections.'))
-    print((f'Number kept after brightness filter {len(keeps)} '
-           f'of {len(detections)} total detections.'))
 
     return keeps
+
+
+def run_shifts_topk(datas, inv_variances, rates, dmjds, min_snr, n_keep,
+                    tile_w=256,
+                    work_dtype=torch.float32, output_dtype=torch.float16):
+    """Run shift-and-stack in low-memory mode and keep online per-pixel top-k.
+
+    Do PHI/PSI sums in loop instead, keeps GPU limited to one image foot print
+
+    Returns CPU tensors with shapes:
+      top_snr: (k, A, B) float16
+      top_alpha: (k, A, B) float32
+      top_rate_idx: (k, A, B) int32
+    """
+    n_im = int(datas.shape[2])
+    A = int(datas.shape[3])
+    B = int(datas.shape[4])
+    k = int(min(n_keep, len(rates)))
+    device = get_device()
+
+    if k <= 0:
+        raise ValueError(f"n_keep: {n_keep} and N rates: {len(rates)}")
+
+    top_snr_cpu = torch.full((k, A, B), -float("inf"),
+                             dtype=output_dtype, device="cpu")
+    top_alpha_cpu = torch.zeros((k, A, B), dtype=output_dtype, device="cpu")
+    top_rate_idx_cpu = torch.full((k, A, B), -1,
+                                  dtype=torch.int32, device="cpu")
+
+    for ir, rate in enumerate(rates):
+        sum_psi = torch.zeros((A, B), dtype=work_dtype, device=device)
+        sum_phi = torch.zeros((A, B), dtype=work_dtype, device=device)
+        sum_alpha = torch.zeros((A, B), dtype=work_dtype, device=device)
+
+        for id in range(n_im):
+            if id == 0:
+                psi = datas[0, 0, id]
+                phi = inv_variances[0, 0, id]
+            else:
+                shifts = (-round(dmjds[id] * rate[1]),
+                          -round(dmjds[id] * rate[0]))
+                psi = torch.roll(datas[0, 0, id], shifts=shifts, dims=[0, 1])
+                phi = torch.roll(inv_variances[0, 0, id],
+                                 shifts=shifts, dims=[0, 1])
+
+            psi = psi.to(work_dtype)
+            phi = phi.to(work_dtype)
+            sum_psi += psi
+            sum_phi += phi
+            sum_alpha += torch.nan_to_num(
+                psi / phi, nan=0.0, posinf=0.0, neginf=0.0)
+
+        nu = torch.nan_to_num(
+            sum_psi / torch.sqrt(sum_phi),
+            nan=-1.0, posinf=0.0, neginf=-1.0)
+        alpha = torch.nan_to_num(
+            sum_alpha / float(n_im),
+            nan=0.0, posinf=0.0, neginf=0.0)
+
+        nu = torch.where(nu > min_snr, nu, torch.full_like(nu, -float("inf")))
+        alpha = torch.where(torch.isfinite(nu), alpha, torch.zeros_like(alpha))
+
+        x0 = 0
+        while x0 < B:
+            x1 = min(x0 + tile_w, B)
+
+            prev_snr = top_snr_cpu[:, :, x0:x1].to(device=device,
+                                                   dtype=work_dtype)
+            prev_alpha = top_alpha_cpu[:, :, x0:x1].to(device=device,
+                                                       dtype=work_dtype)
+            prev_rate = top_rate_idx_cpu[:, :, x0:x1].to(device=device,
+                                                         dtype=torch.int32)
+
+            cand_snr = nu[:, x0:x1].unsqueeze(0)
+            cand_alpha = alpha[:, x0:x1].unsqueeze(0)
+            cand_rate = torch.full((1, A, x1 - x0), ir,
+                                   dtype=torch.int32, device=device)
+
+            all_snr = torch.cat([prev_snr, cand_snr], dim=0)
+            vals, idx = torch.topk(all_snr, k=k, dim=0, largest=True,
+                                   sorted=True)
+
+            all_alpha = torch.cat([prev_alpha, cand_alpha], dim=0)
+            new_alpha = torch.gather(all_alpha, 0, idx)
+            all_rate = torch.cat([prev_rate, cand_rate], dim=0)
+            new_rate = torch.gather(all_rate, 0, idx)
+
+            top_snr_cpu[:, :, x0:x1] = vals.to(torch.float16).cpu()
+            top_alpha_cpu[:, :, x0:x1] = new_alpha.to(torch.float32).cpu()
+            top_rate_idx_cpu[:, :, x0:x1] = new_rate.cpu()
+            x0 = x1
+
+        logging.debug(f"Low-mem shift {ir + 1}/{len(rates)} complete")
+
+    return top_snr_cpu, top_alpha_cpu, top_rate_idx_cpu
+
+
+def topk_to_detections(top_snr, top_alpha, top_rate_idx,
+                       rates,
+                       use_index=False,
+                       dtype="float32"):
+    """Convert top-k cubes into detection table compatible with sns_utils."""
+    if top_snr.shape[0] == 0:
+        return np.zeros((0, 7), dtype=dtype)
+
+    snr_np = np.array(top_snr, dtype=np.float32)
+    alpha_np = np.array(top_alpha, dtype=np.float32)
+    rate_idx_np = np.array(top_rate_idx, dtype=np.int32)
+
+    k, A, B = snr_np.shape
+    idx, idy = np.meshgrid(np.arange(B), np.arange(A))
+    idx = idx.reshape(A * B)
+    idy = idy.reshape(A * B)
+
+    chunks = []
+    for n in range(k):
+        s = rate_idx_np[n].reshape(A * B)
+        snr = snr_np[n].reshape(A * B)
+        alpha = alpha_np[n].reshape(A * B)
+
+        keep = (snr > 0) & (s >= 0)
+        if not np.any(keep):
+            continue
+
+        nkeeps = np.zeros((keep.sum(), 7), dtype=dtype)
+        nkeeps[:, 0] = idx[keep]
+        nkeeps[:, 1] = idy[keep]
+        if use_index:
+            nkeeps[:, 2] = s[keep]
+            nkeeps[:, 3] = 0.0
+        else:
+            nkeeps[:, 2] = rates[s[keep], 0]
+            nkeeps[:, 3] = rates[s[keep], 1]
+        nkeeps[:, 4] = alpha[keep]
+        nkeeps[:, 5] = snr[keep]
+        chunks.append(nkeeps)
+
+    if not chunks:
+        return np.zeros((0, 7), dtype=dtype)
+    return np.concatenate(chunks)

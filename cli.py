@@ -7,7 +7,7 @@ import textwrap
 from data_models import ExtractedDataModel
 from data_models import StackParams
 from data_models import read_flag_list_from_file
-from stack import run
+import stack
 
 APP_NAME = 'pkbmod'
 EXTENSION_WITH_WCS = 1
@@ -82,6 +82,16 @@ def main():
         action='store_true',
         default=False,
         help="Don't use a PSF model file, build kernel using guassian.")
+    parser.add_argument(
+        '--low-mem',
+        action='store_true',
+        default=False,
+        help="Use low-memory shift-and-stack implementation.")
+    parser.add_argument(
+        '--low-mem-tile-w',
+        type=int,
+        default=256,
+        help="X-axis tile width used by low-memory top-k merge.")
     parser.add_argument('--variance-trim', default=1.3, type=float,
                         help="factor above median variance to mask pixels",
                         )
@@ -134,7 +144,7 @@ def main():
     logging.info(f"Saving parameters to {params_filename}")
     logging.info(f"Saving results to {results_filename}")
     logging.info(f"Saving matched plants to {plants_match_filename}")
-    
+
     badflags = read_flag_list_from_file(flaglist_filename)
 
     # Stacking Parameters
@@ -160,10 +170,12 @@ def main():
     data_model.mask_variance(stack_params.variance_trim)
     data_model.pack_inputs()
 
-    run(stack_inputs=data_model.stack_inputs,
-        stack_params=dict(stack_params),
-        results_filename=results_filename,
-        plant_matches_filename=plants_match_filename)
+    stack.run(stack_inputs=data_model.stack_inputs,
+              stack_params=dict(stack_params),
+              results_filename=results_filename,
+              plant_matches_filename=plants_match_filename,
+              low_mem=args.low_mem,
+              low_mem_tile_w=args.low_mem_tile_w)
 
 
 if __name__ == '__main__':

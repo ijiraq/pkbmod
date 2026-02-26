@@ -12,7 +12,8 @@ VARIANCE_MASK = 'VARIANCE'
 
 
 def run(stack_inputs: dict, stack_params: dict,
-        results_filename: str, plant_matches_filename: str):
+        results_filename: str, plant_matches_filename: str,
+        low_mem: bool = False, low_mem_tile_w: int = 256):
     """Given the data load and stacking parameters run the shift-and-stack
     search.
 
@@ -116,6 +117,7 @@ def run(stack_inputs: dict, stack_params: dict,
     _ = torch.rot90(kernel, k=2, dims=(3, 4))
 
     # convolve pixels and variances with the kernels.
+    logging.info(f"Convolving {n_im} images and variances with kernel")
     for ir in range(n_im):
         datas[0, 0, ir, :, :] = torch.conv2d(
             datas[:, :, ir, :, :]*inv_variances[:, :, ir, :, :],
@@ -124,43 +126,65 @@ def run(stack_inputs: dict, stack_params: dict,
             inv_variances[:, :, ir, :, :],
             kernel[:, :, ir, :, :]*kernel[:, :, ir, :, :], padding='same')
 
-    # do the shift-stacking
-    snr_image, alpha_image = utils.run_shifts(datas, inv_variances, rates,
-                                              dmjds,
-                                              min_snr,
-                                              writeTestImages=False)
     if n_keep > len(rates):
         logging.warn((f"Number of stack rate: {len(rates)}"
                       f"is smaller than request n_keep {n_keep}. "
                       f"Only keeping {len(rates)} detections per pixel"))
         n_keep = min(n_keep, len(rates))
 
-    # sort and keep the top n_keep detections,
-    sort_inds = torch.zeros((1, 1, n_keep, A, B),
-                            dtype=torch.int64, device='cpu')
-    logging.debug(f'Packing {snr_image.shape} into {sort_inds.shape}')
+    if low_mem:
+        logging.info("Using low-memory initial shift-and-stack stage")
+        top_snr, top_alpha, top_rate_idx = utils.run_shifts_topk(
+            datas=datas,
+            inv_variances=inv_variances,
+            rates=rates,
+            dmjds=dmjds,
+            min_snr=min_snr,
+            n_keep=n_keep,
+            tile_w=low_mem_tile_w)
+        detections = utils.topk_to_detections(
+            top_snr=top_snr,
+            top_alpha=top_alpha,
+            top_rate_idx=top_rate_idx,
+            rates=rates,
+            use_index=use_index)
+        del top_snr, top_alpha, top_rate_idx
+        gc.collect()
+    else:
+        logging.info("Using original shift-and-stack, high memory")
+        # do the shift-stacking
+        snr_image, alpha_image = utils.run_shifts(datas, inv_variances, rates,
+                                                  dmjds,
+                                                  min_snr,
+                                                  writeTestImages=False)
 
-    # sort on the SNR index (2) and select the top n_keep
-    # these shift rates of those top SNR are selected as the detection
-    sort_step = 1000
-    a = 0
-    b = sort_step
-    while b < B:
-        b = min(a+sort_step, B)
-        logging.debug(f' Sorting {a} to {b} of {B}...')
-        sort_inds_wedge = torch.sort(
-            snr_image[:, :, :, :, a:b].to(device), 2, descending=True)[1]
-        sort_inds[:, :, :, :, a:b] = sort_inds_wedge[:, :, :n_keep, :, :]
-        a += sort_step
-        logging.debug('Done')
+        # sort and keep the top n_keep detections,
+        sort_inds = torch.zeros((1, 1, n_keep, A, B),
+                                dtype=torch.int64, device='cpu')
+        logging.debug(f'Packing {snr_image.shape} into {sort_inds.shape}')
 
-    # trim the negative SNR sources. The reason these show up is
-    # because the likelihood formalism sucks
-    detections = utils.trim_negative_snr(snr_image, alpha_image, sort_inds,
-                                         n_keep, rates, A, B, use_index=True)
-    del snr_image, alpha_image, sort_inds
-    gc.collect()
-    torch.cuda.empty_cache()
+        # sort on the SNR index (2) and select the top n_keep
+        # these shift rates of those top SNR are selected as the detection
+        sort_step = 1000
+        a = 0
+        b = sort_step
+        while b < B:
+            b = min(a+sort_step, B)
+            logging.debug(f' Sorting {a} to {b} of {B}...')
+            sort_inds_wedge = torch.sort(
+                snr_image[:, :, :, :, a:b].to(device), 2, descending=True)[1]
+            sort_inds[:, :, :, :, a:b] = sort_inds_wedge[:, :, :n_keep, :, :]
+            a += sort_step
+            logging.debug('Done')
+
+        # trim the negative SNR sources. The reason these show up is
+        # because the likelihood formalism sucks
+        detections = utils.trim_negative_snr(snr_image, alpha_image, sort_inds,
+                                             n_keep, rates, A, B,
+                                             use_index=use_index)
+        del snr_image, alpha_image, sort_inds
+        gc.collect()
+        torch.cuda.empty_cache()
 
     # trim the flux negative sources
     detections = utils.trim_negative_flux(detections)
