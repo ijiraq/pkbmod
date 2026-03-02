@@ -118,11 +118,14 @@ def create_kernel(psfs, dmjds,
                   rates=None,
                   useNegativeWell=True,
                   useGaussianKernel=False,
-                  kernel_width=14, im_nums=None):
+                  kernel_width=14,
+                  im_nums=None,
+                  dtype=np.float32):
+    
     if psfs is None and not useGaussianKernel:
         logging.error("Set useGaussianKernal when no psfs provided")
         raise ValueError("Set useGaussianKernal when no psfs provided")
-    mean_rate = np.mean(rates, axis=0)
+    mean_rate = np.mean(rates, axis=0, dtype=dtype)
     logging.debug(f"Creating kernel for rates: {mean_rate}")
     device = get_device()
     if useGaussianKernel:
@@ -132,12 +135,13 @@ def create_kernel(psfs, dmjds,
         khw = kernel_width//2
         (x, y) = np.meshgrid(np.arange(kernel_width),
                              np.arange(kernel_width))
-        gauss = np.exp(-((x-khw-0.5)**2 + (y-khw-0.5)**2)/(2*std*std))
-        gauss /= np.sum(gauss)
+        gauss = np.exp(-((x-khw-0.5)**2 + (y-khw-0.5)**2)/(2*std*std), 
+                       dtype=dtype)
+        gauss /= np.sum(gauss, dtype=dtype)
 
         kernel = torch.tensor(
             np.zeros((1, 1, len(dmjds), kernel_width, kernel_width),
-                     dtype='float32')
+                     dtype=dtype)
             ).to(device)  # .cuda()
         for ir in range(len(dmjds)):
             kernel[0, 0, ir, :, :] = torch.tensor(np.copy(gauss))
@@ -155,7 +159,7 @@ def create_kernel(psfs, dmjds,
 
         kernel = torch.tensor(
             np.zeros((1, 1, len(psfs), kernel_width, kernel_width),
-                     dtype='float32')
+                     dtype=dtype)
             ).to(device)
         for ir in range(len(psfs)):
             psf = psfs[ir]

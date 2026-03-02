@@ -65,7 +65,7 @@ class ExtractedDataModel(object):
     VARIANCE_BITMASK = "SAT"
 
     def __init__(self, base_dir, collections, day_obs, chip, dataset_type,
-                 bitmask_filename=None):
+                 bitmask_filename=None, data_dtype=np.float16):
         self.base_dir = base_dir
         self.collections = collections
         self.day_obs = day_obs
@@ -73,6 +73,7 @@ class ExtractedDataModel(object):
         self.dataset_type = dataset_type
         self.properties_dataset_type = "properties"
         self.bitmask_filename = bitmask_filename
+        self.data_dtype = data_dtype
         self._warps = None
         self._psfs = None
         self._properties = None
@@ -123,12 +124,16 @@ class ExtractedDataModel(object):
         """convert list of arrays in stack_inputs into 3d arrays
 
         """
-        for key in ['datas', 'masks', 'variances',
-                    'dmjds', 'psfs', 'fwhms', 'im_nums']:
-            self.stack_inputs[key] = np.array(self.stack_inputs[key])
+        for key in ['datas', 'variances', 'psfs', 'dmjds', 'fwhms']:
+            self.stack_inputs[key] = np.array(self.stack_inputs[key],
+                                              dtype=self.data_dtype)
+        self.stack_inputs['masks'] = np.array(self.stack_inputs['masks'],
+                                              dtype=np.uint16)
+        self.stack_inputs['im_nums'] = np.array(self.stack_inputs['im_nums'],
+                                                dtype=np.int32)
         # im_nums should be int arrays
-        self.stack_inputs['im_nums'] = (
-            self.stack_inputs['im_nums'].astype('int'))
+        # self.stack_inputs['im_nums'] = (
+        #    self.stack_inputs['im_nums'].astype('int'))
         return self.stack_inputs
 
     @property
@@ -147,12 +152,15 @@ class ExtractedDataModel(object):
         logging.debug("Creating numpy data lists to pack data onto GPU with.")
         for im_num in self.warps:
             hdul = self.warps[im_num]
-            datas.append(hdul[DATA_EXTNO].data)
-            masks.append(hdul[MASK_EXTNO].data)
-            variances.append(hdul[VARIANCE_EXTNO].data)
+            datas.append(np.asarray(hdul[DATA_EXTNO].data,
+                                    dtype=self.data_dtype))
+            masks.append(np.asarray(hdul[MASK_EXTNO].data, dtype=np.uint16))
+            variances.append(np.asarray(hdul[VARIANCE_EXTNO].data,
+                                        dtype=self.data_dtype))
             dmjds.append(self.properties[im_num]['dmjd'])
             fwhms.append(self.properties[im_num]['fwhm'])
-            psf_data = self.psfs[im_num][PSF_DATA_EXTNO].data
+            psf_data = np.asarray(self.psfs[im_num][PSF_DATA_EXTNO].data,
+                                  dtype=self.data_dtype)
             psfs.append(psf_data/np.sum(psf_data))
             im_nums.append(im_num)
         logging.debug(f"Using {len(datas)} images.")

@@ -1,6 +1,7 @@
 from argparse import ArgumentParser, ArgumentDefaultsHelpFormatter
 import logging
 import logger
+import numpy as np
 import os
 import textwrap
 
@@ -95,6 +96,12 @@ def main():
     parser.add_argument('--variance-trim', default=1.3, type=float,
                         help="factor above median variance to mask pixels",
                         )
+    parser.add_argument(
+        '--float-precision',
+        type=int,
+        choices=[16, 32],
+        default=16,
+        help="Floating-point precision for CLI workflow arrays/tensors.")
     parser.add_argument('--rt', action='store_true',
                         default=False,
                         help='Run on the reverse time diff images instead.')
@@ -126,6 +133,7 @@ def main():
     chip = args.chip
     bitmask_filename = args.bitmask
     flaglist_filename = args.flagkeys
+    run_dtype = np.float16 if args.float_precision == 16 else np.float32
 
     path = "/".join([base_dir,
                      f"{rt}{APP_NAME}",
@@ -165,7 +173,8 @@ def main():
 
     data_model = ExtractedDataModel(base_dir, collections,
                                     day_obs, chip, dataset_type,
-                                    bitmask_filename=bitmask_filename)
+                                    bitmask_filename=bitmask_filename,
+                                    data_dtype=run_dtype)
 
     data_model.mask_variance(stack_params.variance_trim)
     data_model.pack_inputs()
@@ -175,7 +184,8 @@ def main():
               results_filename=results_filename,
               plant_matches_filename=plants_match_filename,
               low_mem=args.low_mem,
-              low_mem_tile_w=args.low_mem_tile_w)
+              low_mem_tile_w=args.low_mem_tile_w,
+              dtype=run_dtype)
 
 
 if __name__ == '__main__':

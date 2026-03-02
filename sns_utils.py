@@ -7,7 +7,8 @@ from sns_data_nh import get_device
 
 
 def run_shifts(datas, inv_variances, rates, dmjds, min_snr, n_keep=4,
-               writeTestImages=False, tile_w=256, word_dtype=torch.float32):
+               writeTestImages=False, tile_w=256,
+               word_dtype=torch.float16):
     n_im = len(datas[0, 0, :])
     logging.debug(f'NUM IM {n_im}')
     c = torch.zeros_like(datas)
@@ -17,10 +18,10 @@ def run_shifts(datas, inv_variances, rates, dmjds, min_snr, n_keep=4,
 
     snr_image = torch.zeros((1, 1,
                              len(rates), datas.size()[3], datas.size()[4]),
-                            dtype=torch.float16)
+                            dtype=word_dtype)
     alpha_image = torch.zeros((1, 1,
-                               len(rates), datas.size()[3], datas.size()[4]),
-                              dtype=torch.float32)
+                              len(rates), datas.size()[3], datas.size()[4]),
+                              dtype=word_dtype)
 
     # rates=[[-200.6777606841237, 78.88276756451387]]
     for ir in range(len(rates)):
@@ -57,7 +58,7 @@ def run_shifts(datas, inv_variances, rates, dmjds, min_snr, n_keep=4,
         inds = where.nonzero()
 
         snr_image[0, 0, ir, inds[:, 0], inds[:, 1]] = (
-            nu[0, 0, inds[:, 0], inds[:, 1]].cpu().type(torch.float16))
+            nu[0, 0, inds[:, 0], inds[:, 1]].cpu().to(word_dtype))
         # flux per image not per stack
         alpha_image[0, 0, ir, inds[:, 0], inds[:, 1]] = (
             alpha[0, 0, inds[:, 0], inds[:, 1]].cpu()/n_im)
@@ -76,7 +77,8 @@ def run_shifts(datas, inv_variances, rates, dmjds, min_snr, n_keep=4,
 
 
 def trim_negative_snr(snr_image, alpha_image, sort_inds,
-                      n_keep, rates, A, B, use_index=False):
+                      n_keep, rates, A, B, use_index=False,
+                      dtype=np.float16):
     # trim the negative SNR sources. The reason these show up is
     # because the likelihood formalism sucks
     idx, idy = np.meshgrid(np.arange(B), np.arange(A))
@@ -92,7 +94,7 @@ def trim_negative_snr(snr_image, alpha_image, sort_inds,
         logging.debug(f"keep index length: {inds.shape}")
         logging.debug(f"length of indexs: {(s[inds]).shape}")
         if n == 0:
-            keeps = np.zeros((len(inds), 7), dtype='float32')
+            keeps = np.zeros((len(inds), 7), dtype=dtype)
             keeps[:, 0] = idx[inds]
             keeps[:, 1] = idy[inds]
             if use_index:
@@ -104,7 +106,7 @@ def trim_negative_snr(snr_image, alpha_image, sort_inds,
             keeps[:, 4] = alpha.reshape(A*B)[inds]
             keeps[:, 5] = SNR.reshape(A*B)[inds]
         else:
-            nkeeps = np.zeros((len(inds), 7), dtype='float32')
+            nkeeps = np.zeros((len(inds), 7), dtype=dtype)
             logging.debug(f"Keeps size: {nkeeps.shape}")
             nkeeps[:, 0] = idx[inds]
             nkeeps[:, 1] = idy[inds]
@@ -137,9 +139,11 @@ def brightness_filter(im_datas, inv_vars, c, cv, kernel,
                       n_bright_test=10, test_high=1.15, test_low=0.85):
 
     device = get_device()
-    nb_ref = torch.tensor(10.0**np.linspace(np.log10(test_low),
-                                            np.log10(test_high),
-                                            n_bright_test)).to(device)
+    nb_ref = torch.as_tensor(10.0**np.linspace(np.log10(test_low),
+                                               np.log10(test_high),
+                                               n_bright_test),
+                             dtype=im_datas.dtype,
+                             device=device)
 
     for ir in range(len(rates)):
         t1 = time.time()
@@ -449,15 +453,19 @@ def brightness_filter_fast(im_datas, inv_vars, c, cv, kernel,
                            dmjds, rates, detections, khw, n_im,
                            n_bright_test=10, test_high=1.15,
                            test_low=0.85,
-                           exact_check=True, inexact_rtol=1.e-7,
+                           exact_check=True,
+                           inexact_rtol=1.e-7,
                            use_index=False,
-                           n_det_iter=200):
+                           n_det_iter=200,
+                           word_dtype=torch.float16):
 
     device = get_device()
 
-    nb_ref = torch.tensor(10.0**np.linspace(np.log10(test_low),
-                                            np.log10(test_high),
-                                            n_bright_test)).to(device)
+    nb_ref = torch.as_tensor(10.0**np.linspace(np.log10(test_low),
+                                               np.log10(test_high),
+                                               n_bright_test),
+                             dtype=word_dtype,
+                             device=device)
 
     ks = 2 * khw  # kernel spatial size
     # Precompute the unit-scaled kernel: shape (n_bright_test, n_im, ks, ks)
@@ -473,9 +481,9 @@ def brightness_filter_fast(im_datas, inv_vars, c, cv, kernel,
     im_idx = torch.arange(n_im, device=device)
 
     keeps_list = []
+    log_info_enabled = logging.getLogger().isEnabledFor(logging.INFO)
 
     for ir in range(len(rates)):
-
         t1 = time.time()
         if use_index:
             W = np.where(detections[:, 2] == ir)
@@ -504,8 +512,9 @@ def brightness_filter_fast(im_datas, inv_vars, c, cv, kernel,
                                       shifts=shifts,
                                       dims=[0, 1])
 
+        kept_chunks = []
         n_done_iter = 0
-        while n_done_iter < len(W[0])-1:
+        while n_done_iter < len(W[0]):
 
             w = W[0][n_done_iter:min(n_done_iter+n_det_iter, len(W[0]))]
 
@@ -517,9 +526,11 @@ def brightness_filter_fast(im_datas, inv_vars, c, cv, kernel,
             # Extract coordinates for all detections at this rate
             xs = detections[det_idx, 0].astype(int) + khw
             ys = detections[det_idx, 1].astype(int) + khw
-            fluxes = torch.tensor(detections[det_idx, 4],
-                                  dtype=torch.float64,
-                                  device=device)
+            fluxes = torch.as_tensor(
+                detections[det_idx, 4],
+                dtype=word_dtype,
+                device=device
+            )
 
             # Batch-extract all patches via advanced indexing
             c_3d = c[0, 0]    # (n_im, H, W)
@@ -582,24 +593,30 @@ def brightness_filter_fast(im_datas, inv_vars, c, cv, kernel,
             # Filter: keep detections if best brightness not at the boundary
             valid = (arg_mins != 0) & (arg_mins != (n_bright_test - 1))
 
-            if n_done_iter == 0:
-                kept_idx = det_idx[np.where(valid)]
-            else:
-                kept_idx = np.concatenate([kept_idx, det_idx[np.where(valid)]])
+            kept_batch = det_idx[np.where(valid)]
+            if len(kept_batch) > 0:
+                kept_chunks.append(kept_batch)
 
             n_done_iter += len(w)
             del diff
-            gc.collect()
 
-            logging.info((f'{ir+1}/{len(rates)}, '
-                          f'vx: {str(rates[ir][0])[:7]}, '
-                          f'vy: {str(rates[ir][1])[:7]}, '
-                          f'pre: {len(W[0])}, '
-                          f'post: {len(kept_idx)},  '
-                          f'in time {time.time()-t1}'))
-
-        if len(kept_idx) > 0:
+        if kept_chunks:
+            kept_idx = np.concatenate(kept_chunks)
             keeps_list.append(kept_idx)
+        else:
+            kept_idx = np.array([], dtype=np.intp)
+
+        if log_info_enabled:
+            logging.info(
+                ("%d/%d, vx: %.5f, vy: %.5f, pre: %d, post: %d, in time %.3f"),
+                ir + 1,
+                len(rates),
+                rates[ir][0],
+                rates[ir][1],
+                len(W[0]),
+                len(kept_idx),
+                time.time() - t1,
+            )
     if keeps_list:
         keeps = np.concatenate(keeps_list)
     else:
@@ -613,14 +630,15 @@ def brightness_filter_fast(im_datas, inv_vars, c, cv, kernel,
 
 def run_shifts_topk(datas, inv_variances, rates, dmjds, min_snr, n_keep,
                     tile_w=256,
-                    work_dtype=torch.float32, output_dtype=torch.float16):
+                    work_dtype=torch.float16,
+                    output_dtype=torch.float16):
     """Run shift-and-stack in low-memory mode and keep online per-pixel top-k.
 
     Do PHI/PSI sums in loop instead, keeps GPU limited to one image foot print
 
     Returns CPU tensors with shapes:
       top_snr: (k, A, B) float16
-      top_alpha: (k, A, B) float32
+      top_alpha: (k, A, B) float16
       top_rate_idx: (k, A, B) int32
     """
     n_im = int(datas.shape[2])
@@ -696,8 +714,8 @@ def run_shifts_topk(datas, inv_variances, rates, dmjds, min_snr, n_keep,
             all_rate = torch.cat([prev_rate, cand_rate], dim=0)
             new_rate = torch.gather(all_rate, 0, idx)
 
-            top_snr_cpu[:, :, x0:x1] = vals.to(torch.float16).cpu()
-            top_alpha_cpu[:, :, x0:x1] = new_alpha.to(torch.float32).cpu()
+            top_snr_cpu[:, :, x0:x1] = vals.to(output_dtype).cpu()
+            top_alpha_cpu[:, :, x0:x1] = new_alpha.to(output_dtype).cpu()
             top_rate_idx_cpu[:, :, x0:x1] = new_rate.cpu()
             x0 = x1
 
@@ -709,13 +727,13 @@ def run_shifts_topk(datas, inv_variances, rates, dmjds, min_snr, n_keep,
 def topk_to_detections(top_snr, top_alpha, top_rate_idx,
                        rates,
                        use_index=False,
-                       dtype="float32"):
+                       dtype=np.float16):
     """Convert top-k cubes into detection table compatible with sns_utils."""
     if top_snr.shape[0] == 0:
         return np.zeros((0, 7), dtype=dtype)
 
-    snr_np = np.array(top_snr, dtype=np.float32)
-    alpha_np = np.array(top_alpha, dtype=np.float32)
+    snr_np = np.array(top_snr, dtype=dtype)
+    alpha_np = np.array(top_alpha, dtype=dtype)
     rate_idx_np = np.array(top_rate_idx, dtype=np.int32)
 
     k, A, B = snr_np.shape

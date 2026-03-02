@@ -13,7 +13,8 @@ VARIANCE_MASK = 'VARIANCE'
 
 def run(stack_inputs: dict, stack_params: dict,
         results_filename: str, plant_matches_filename: str,
-        low_mem: bool = False, low_mem_tile_w: int = 256):
+        low_mem: bool = False, low_mem_tile_w: int = 256,
+        dtype=np.float16):
     """Given the data load and stacking parameters run the shift-and-stack
     search.
 
@@ -52,6 +53,13 @@ def run(stack_inputs: dict, stack_params: dict,
     trim_snr = stack_params['trim_snr']
     dist_max = stack_params['dist_max']
     dist_rate_max = stack_params['dist_rate_max']
+    dtype = np.dtype(dtype)
+    if dtype == np.float16:
+        torch_dtype = torch.float16
+    elif dtype == np.float32:
+        torch_dtype = torch.float32
+    else:
+        raise ValueError(f"Unsupported dtype {dtype}; use np.float16 or np.float32")
 
     rates = data.get_shift_rates(
         plants=plants,
@@ -68,16 +76,17 @@ def run(stack_inputs: dict, stack_params: dict,
         useNegativeWell=use_negative_well,
         useGaussianKernel=use_gaussian_kernel,
         kernel_width=kernel_width,
-        im_nums=im_nums)
+        im_nums=im_nums,
+        dtype=dtype)
 
     (A, B) = datas[0].shape
 
     np_datas = np.expand_dims(np.expand_dims(
-        np.array(datas, dtype='float32'), 0), 0)
+        np.array(datas, dtype=dtype), 0), 0)
     np_inv_variances = np.expand_dims(np.expand_dims(
-        1.0/np.array(variances, dtype='float32'), 0), 0)
+        1.0/np.array(variances, dtype=dtype), 0), 0)
     np_masks = np.expand_dims(np.expand_dims(
-        np.array(masks, dtype='int'), 0), 0)
+        np.array(masks, dtype=np.uint16), 0), 0)
 
     # (np_masks & badflags) == 0 is FALSE when masks matches a badflag value
     # ~((np_masks & badflags) == 0) is TRUE when mask matches a badflag value
@@ -96,7 +105,7 @@ def run(stack_inputs: dict, stack_params: dict,
     np_inv_variances[w] = 0.0
     np_masks[w] = 0
     # masks with 1 are GOOD pixels, 0 are BAD pixels
-    np_masks = np.clip(np_masks, 0, 1)
+    np_masks = np.clip(np_masks, 0, 1).astype(np.uint8, copy=False)
 
     # using logical & value of mask > 0 if mask holds value in bits
     # w = (np_masks & badvalue > 0) | np.isnan(datas)
@@ -110,9 +119,10 @@ def run(stack_inputs: dict, stack_params: dict,
     device = data.get_device()
     # push the data to the device for tourch shift-and-stack
     logging.debug(f"Loading data onto {device}")
-    datas = torch.tensor(np_datas).to(device)
-    inv_variances = torch.tensor(np_inv_variances).to(device)
-    n_im = int(torch.tensor(float(datas.size()[2])).to(device).item())
+    datas = torch.as_tensor(np_datas, dtype=torch_dtype, device=device)
+    inv_variances = torch.as_tensor(np_inv_variances,
+                                    dtype=torch_dtype, device=device)
+    n_im = int(datas.size()[2])
 
     _ = torch.rot90(kernel, k=2, dims=(3, 4))
 
@@ -141,13 +151,16 @@ def run(stack_inputs: dict, stack_params: dict,
             dmjds=dmjds,
             min_snr=min_snr,
             n_keep=n_keep,
-            tile_w=low_mem_tile_w)
+            tile_w=low_mem_tile_w,
+            work_dtype=torch_dtype,
+            output_dtype=torch_dtype)
         detections = utils.topk_to_detections(
             top_snr=top_snr,
             top_alpha=top_alpha,
             top_rate_idx=top_rate_idx,
             rates=rates,
-            use_index=use_index)
+            use_index=use_index,
+            dtype=dtype)
         del top_snr, top_alpha, top_rate_idx
         gc.collect()
     else:
@@ -156,7 +169,8 @@ def run(stack_inputs: dict, stack_params: dict,
         snr_image, alpha_image = utils.run_shifts(datas, inv_variances, rates,
                                                   dmjds,
                                                   min_snr,
-                                                  writeTestImages=False)
+                                                  writeTestImages=False,
+                                                  word_dtype=torch_dtype)
 
         # sort and keep the top n_keep detections,
         sort_inds = torch.zeros((1, 1, n_keep, A, B),
@@ -181,11 +195,16 @@ def run(stack_inputs: dict, stack_params: dict,
         # because the likelihood formalism sucks
         detections = utils.trim_negative_snr(snr_image, alpha_image, sort_inds,
                                              n_keep, rates, A, B,
-                                             use_index=use_index)
+                                             use_index=use_index,
+                                             dtype=dtype)
         del snr_image, alpha_image, sort_inds
         gc.collect()
         torch.cuda.empty_cache()
 
+    del datas
+    del inv_variances
+    gc.collect()
+    torch.cuda.empty_cache()
     # trim the flux negative sources
     detections = utils.trim_negative_flux(detections)
 
@@ -193,13 +212,19 @@ def run(stack_inputs: dict, stack_params: dict,
     # Check n_bright_test values between test_low and
     # test_high fraction of the estimated value
     # pad the data and variance arrays
-    im_datas = functional.pad(torch.tensor(np_datas).to(device),
+    logging.debug(f"Creating im_datas with shape {np_datas.shape}")
+    im_datas = functional.pad(torch.as_tensor(np_datas,
+                                              dtype=torch_dtype,
+                                              device=device),
                               (khw, khw, khw, khw))
-    inv_vars = functional.pad(torch.tensor(0.5*np_inv_variances).to(device),
-                              (khw, khw, khw, khw))
-    #
     del np_datas  # I don't think this is used again.
     gc.collect()
+    logging.debug(f"Creating inv_vars with shape {np_inv_variances.shape}")
+    inv_vars = functional.pad(
+        torch.as_tensor(
+            np.asarray(0.5, dtype=dtype) * np_inv_variances,
+            dtype=torch_dtype,
+            device=device), (khw, khw, khw, khw))
 
     c = torch.zeros_like(im_datas)
     c[0, 0, 0] = im_datas[0, 0, 0]
@@ -212,7 +237,8 @@ def run(stack_inputs: dict, stack_params: dict,
                                          test_high=1.15,
                                          test_low=0.85,
                                          exact_check=False,
-                                         use_index=use_index)
+                                         use_index=use_index,
+                                         word_dtype=torch_dtype)
 
     logging.info(f"Number of detections: {len(detections)}")
     logging.info(f"Number kept: {len(keeps)}")
@@ -224,8 +250,9 @@ def run(stack_inputs: dict, stack_params: dict,
     gc.collect()
     torch.cuda.empty_cache()
 
-    im_masks = functional.pad(torch.tensor(np_masks),
-                              (khw, khw, khw, khw)).to(device)
+    im_masks = functional.pad(
+        torch.as_tensor(np_masks, dtype=torch_dtype, device=device),
+        (khw, khw, khw, khw))
     del np_masks
 
     # create the stamps
@@ -267,7 +294,11 @@ def run(stack_inputs: dict, stack_params: dict,
                   f"final SNR trim: {n_det}."))
 
     inv_vars = functional.pad(
-        torch.tensor(0.5*np_inv_variances).to(device), (khw, khw, khw, khw))
+        torch.as_tensor(
+            np.asarray(0.5, dtype=dtype) * np_inv_variances,
+            dtype=torch_dtype,
+            device=device),
+        (khw, khw, khw, khw))
     cv[0, 0, 0] = inv_vars[0, 0, 0]
 
     grid_detections, grid_stamps = utils.position_filter(
@@ -301,11 +332,12 @@ def run(stack_inputs: dict, stack_params: dict,
                 rx = rates[np.round(det[:, 2]).astype("int"), 0]
                 ry = rates[np.round(det[:, 2]).astype("int"), 1]
             else:
-                rx = final_detections[:, 2]
-                ry = final_detections[:, 3]
-            dist_rate_sq = ((plants['rate_x'][i] - rx**2) +
-                            (plants['rate_y'][i] - ry**2))
-            w = (dist_sq < dist_max**2) & (dist_rate_sq < dist_rate_max**2)
+                rx = det[:, 2]
+                ry = det[:, 3]
+            dist_rate_sq = ((plants['rate_x'][i] - rx)**2 +
+                            (plants['rate_y'][i] - ry)**2)
+            w = ((dist_sq < dist_max**2) &
+                 (dist_rate_sq < dist_rate_max**2))
             plants[detection_type][i] = w.sum() > 0
         plants['min_dist_r'][i] = np.min(dist_sq)**0.5
         plants['min_dist_v'][i] = np.min(dist_rate_sq)**0.5
