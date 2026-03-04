@@ -65,7 +65,7 @@ class ExtractedDataModel(object):
     VARIANCE_BITMASK = "SAT"
 
     def __init__(self, base_dir, collections, day_obs, chip, dataset_type,
-                 bitmask_filename=None, data_dtype=np.float16):
+                 bitmask_filename=None, data_dtype=np.float32):
         self.base_dir = base_dir
         self.collections = collections
         self.day_obs = day_obs
@@ -100,12 +100,13 @@ class ExtractedDataModel(object):
         dmjds = self.stack_inputs['dmjds']
         im_nums = self.stack_inputs['im_nums']
         for idx in range(len(datas)):
+            mask_bit = np.uint32(1) << np.uint32(self.bitmask[self.VARIANCE_BITMASK])
             w = np.where((np.isinf(variances[idx])) |
                          (np.isinf(datas[idx])) |
                          (np.isnan(datas[idx])) |
                          (datas[idx] > self.MAX_PIX_VALUE) |
                          (datas[idx] < self.MIN_PIX_VALUE))
-            masks[idx][w] |= 2**self.bitmask[self.VARIANCE_BITMASK]
+            masks[idx][w] |= mask_bit
             variances[idx][w] = np.nan
             datas[idx][w] = 0.0
             nan_med_variance = np.nanmedian(variances[idx])
@@ -118,7 +119,7 @@ class ExtractedDataModel(object):
                 w = np.where(
                     variances[idx] >
                     variance_trim*nan_med_variance)
-                masks[idx][w] |= 2**self.bitmask[self.VARIANCE_BITMASK]
+                masks[idx][w] |= mask_bit
 
     def pack_inputs(self) -> None:
         """convert list of arrays in stack_inputs into 3d arrays
@@ -128,7 +129,7 @@ class ExtractedDataModel(object):
             self.stack_inputs[key] = np.array(self.stack_inputs[key],
                                               dtype=self.data_dtype)
         self.stack_inputs['masks'] = np.array(self.stack_inputs['masks'],
-                                              dtype=np.uint16)
+                                              dtype=np.uint32)
         self.stack_inputs['im_nums'] = np.array(self.stack_inputs['im_nums'],
                                                 dtype=np.int32)
         # im_nums should be int arrays
@@ -154,7 +155,7 @@ class ExtractedDataModel(object):
             hdul = self.warps[im_num]
             datas.append(np.asarray(hdul[DATA_EXTNO].data,
                                     dtype=self.data_dtype))
-            masks.append(np.asarray(hdul[MASK_EXTNO].data, dtype=np.uint16))
+            masks.append(np.asarray(hdul[MASK_EXTNO].data, dtype=np.uint32))
             variances.append(np.asarray(hdul[VARIANCE_EXTNO].data,
                                         dtype=self.data_dtype))
             dmjds.append(self.properties[im_num]['dmjd'])
@@ -313,8 +314,8 @@ class ExtractedDataModel(object):
         ra1 = plants['ra'] + plants['rate_ra']/3600.0
         dec1 = plants['dec'] + plants['rate_dec']/3600.0
         x1, y1 = self.ref_wcs.all_world2pix(ra1, dec1, 0)
-        plants['rate_x'] = (x1-x0)/24.0
-        plants['rate_y'] = (y1-y0)/24.0
+        plants['rate_x'] = (x1-x0)*24.0
+        plants['rate_y'] = (y1-y0)*24.0
         plants.sort('mag')
         self._plants = plants
         return self._plants
