@@ -24,7 +24,8 @@ def run(stack_inputs: dict, stack_params: dict,
     """
     # this routine is setup to store the index in the detection tensor rather
     # than the rates.
-    use_index = True
+    use_index = False
+    exact_check = False
 
     # now map to the array variables used in rest of code
     datas = stack_inputs['datas']
@@ -86,7 +87,7 @@ def run(stack_inputs: dict, stack_params: dict,
     np_inv_variances = np.expand_dims(np.expand_dims(
         1.0/np.array(variances, dtype=dtype), 0), 0)
     np_masks = np.expand_dims(np.expand_dims(
-        np.array(masks, dtype=np.uint16), 0), 0)
+        np.array(masks, dtype=np.uint32), 0), 0)
 
     # (np_masks & badflags) == 0 is FALSE when masks matches a badflag value
     # ~((np_masks & badflags) == 0) is TRUE when mask matches a badflag value
@@ -103,7 +104,7 @@ def run(stack_inputs: dict, stack_params: dict,
     w = np.where(~((np_masks & badflags) == 0) | np.isnan(datas))
     np_datas[w] = 0.0
     np_inv_variances[w] = 0.0
-    np_masks[w] = 0
+    np_masks[w] = np.uint32(0)
     # masks with 1 are GOOD pixels, 0 are BAD pixels
     np_masks = np.clip(np_masks, 0, 1).astype(np.uint8, copy=False)
 
@@ -114,6 +115,12 @@ def run(stack_inputs: dict, stack_params: dict,
     # for shift-and-stack routines masks with 1 are GOOD pixels
     # np_masks[w] = 0
     # np_masks = np.clip(np_masks, 0, 1)
+
+    # In low-memory mode we also force post-shift processing to fp16
+    # to reduce resident GPU memory in brightness/stamp/position stages.
+    post_torch_dtype = torch.float16 if low_mem else torch_dtype
+    logging.debug(("Dtypes: initial_shift=%s, post_shift=%s, low_mem=%s"),
+                  torch_dtype, post_torch_dtype, low_mem)
 
     # set device value based on gpu availability.
     device = data.get_device()
@@ -144,6 +151,8 @@ def run(stack_inputs: dict, stack_params: dict,
 
     if low_mem:
         logging.info("Using low-memory initial shift-and-stack stage")
+        logging.debug("run_shifts_topk dtype: work=%s output=%s",
+                      torch_dtype, torch_dtype)
         top_snr, top_alpha, top_rate_idx = utils.run_shifts_topk(
             datas=datas,
             inv_variances=inv_variances,
@@ -196,6 +205,7 @@ def run(stack_inputs: dict, stack_params: dict,
         detections = utils.trim_negative_snr(snr_image, alpha_image, sort_inds,
                                              n_keep, rates, A, B,
                                              use_index=use_index,
+                                             exact_check=exact_check,
                                              dtype=dtype)
         del snr_image, alpha_image, sort_inds
         gc.collect()
@@ -212,9 +222,10 @@ def run(stack_inputs: dict, stack_params: dict,
     # Check n_bright_test values between test_low and
     # test_high fraction of the estimated value
     # pad the data and variance arrays
+    logging.debug("Post-shift tensor dtype: %s", post_torch_dtype)
     logging.debug(f"Creating im_datas with shape {np_datas.shape}")
     im_datas = functional.pad(torch.as_tensor(np_datas,
-                                              dtype=torch_dtype,
+                                              dtype=post_torch_dtype,
                                               device=device),
                               (khw, khw, khw, khw))
     del np_datas  # I don't think this is used again.
@@ -223,7 +234,7 @@ def run(stack_inputs: dict, stack_params: dict,
     inv_vars = functional.pad(
         torch.as_tensor(
             np.asarray(0.5, dtype=dtype) * np_inv_variances,
-            dtype=torch_dtype,
+            dtype=post_torch_dtype,
             device=device), (khw, khw, khw, khw))
 
     c = torch.zeros_like(im_datas)
@@ -236,9 +247,9 @@ def run(stack_inputs: dict, stack_params: dict,
                                          n_bright_test=10,
                                          test_high=1.15,
                                          test_low=0.85,
-                                         exact_check=False,
+                                         exact_check=exact_check,
                                          use_index=use_index,
-                                         word_dtype=torch_dtype)
+                                         word_dtype=post_torch_dtype)
 
     logging.info(f"Number of detections: {len(detections)}")
     logging.info(f"Number kept: {len(keeps)}")
@@ -251,7 +262,7 @@ def run(stack_inputs: dict, stack_params: dict,
     torch.cuda.empty_cache()
 
     im_masks = functional.pad(
-        torch.as_tensor(np_masks, dtype=torch_dtype, device=device),
+        torch.as_tensor(np_masks, dtype=post_torch_dtype, device=device),
         (khw, khw, khw, khw))
     del np_masks
 
@@ -259,6 +270,7 @@ def run(stack_inputs: dict, stack_params: dict,
     mean_stamps = utils.create_stamps(im_datas, im_masks,
                                       c, cv, dmjds, rates,
                                       filt_detections, khw,
+                                      exact_check=exact_check,
                                       use_index=use_index)
     del im_masks
     gc.collect()
@@ -296,14 +308,15 @@ def run(stack_inputs: dict, stack_params: dict,
     inv_vars = functional.pad(
         torch.as_tensor(
             np.asarray(0.5, dtype=dtype) * np_inv_variances,
-            dtype=torch_dtype,
+            dtype=post_torch_dtype,
             device=device),
         (khw, khw, khw, khw))
     cv[0, 0, 0] = inv_vars[0, 0, 0]
 
     grid_detections, grid_stamps = utils.position_filter(
         clust_detections, clust_stamps, im_datas, inv_vars,
-        c, cv, kernel, dmjds, rates, khw, use_index=use_index)
+        c, cv, kernel, dmjds, rates, khw, exact_check=exact_check, 
+        use_index=use_index)
 
     w = np.where(grid_detections[:, 5] >= trim_snr)
     final_detections = grid_detections[w]
@@ -313,15 +326,16 @@ def run(stack_inputs: dict, stack_params: dict,
     logging.info(f'Number of candidates {n_det}')
 
     # columns to add to the plant table to track matched detections
-    match_columns = ["min_dist_r", "min_dist_v",
-                     "det_shift", "det_filt", "det_clust", "det_final",
-                     "num_match"]
-    for column in match_columns:
-        plants[column] = np.nan
     detection_types = {'det_shift': detections,
                        'det_filt': filt_detections,
                        'det_clust': clust_detections,
                        'det_final': final_detections}
+    for column in ["min_dist_r", "min_dist_v"]:
+        plants[column] = np.nan
+    for column in detection_types:
+        plants[column] = 0
+    plants['num_match'] = 0
+
     for i in range(len(plants)):
         for detection_type in detection_types:
             det = detection_types[detection_type]
@@ -353,7 +367,7 @@ def run(stack_inputs: dict, stack_params: dict,
     final_stamps = final_stamps[args]
 
     logging.info(f"Saving to: {results_filename}")
-    with open(results_filename, 'w+') as han:
+    with open(results_filename, 'w') as han:
         for i in range(len(final_detections)):
             # lookup the rate in the rates if use_index
             if use_index:
