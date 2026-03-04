@@ -100,7 +100,7 @@ def main():
         '--float-precision',
         type=int,
         choices=[16, 32],
-        default=16,
+        default=32,
         help="Floating-point precision for CLI workflow arrays/tensors.")
     parser.add_argument('--rt', action='store_true',
                         default=False,
