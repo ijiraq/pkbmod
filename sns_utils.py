@@ -25,12 +25,12 @@ def run_shifts(datas, inv_variances, rates, dmjds, min_snr, n_keep=4,
 
     # rates=[[-200.6777606841237, 78.88276756451387]]
     for ir in range(len(rates)):
-        for id in range(1, n_im):
-            shifts = (-round(dmjds[id]*rates[ir][1]),
-                      -round(dmjds[id]*rates[ir][0]))
-            c[0, 0, id,] = torch.roll(datas[0, 0, id],
+        for idx in range(1, n_im):
+            shifts = (-round(dmjds[idx]*rates[ir][1]),
+                      -round(dmjds[idx]*rates[ir][0]))
+            c[0, 0, idx,] = torch.roll(datas[0, 0, idx],
                                       shifts=shifts, dims=[0, 1])
-            cv[0, 0, id] = torch.roll(inv_variances[0, 0, id],
+            cv[0, 0, idx] = torch.roll(inv_variances[0, 0, idx],
                                       shifts=shifts, dims=[0, 1])
         # C = functional.conv3d(c, kernel)
         # sums = torch.sum(functional.conv3d(c, ones,padding='same'), 2)
@@ -150,22 +150,22 @@ def brightness_filter(im_datas, inv_vars, c, cv, kernel,
         w = np.where((detections[:, 2] == rates[ir][0]) &
                      (detections[:, 3] == rates[ir][1]))
 
-        for id in range(1, n_im):
-            shifts = (-round(dmjds[id]*rates[ir][1]),
-                      -round(dmjds[id]*rates[ir][0]))
-            c[0, 0, id] = torch.roll(im_datas[0, 0, id],
+        for idx in range(1, n_im):
+            shifts = (-round(dmjds[idx]*rates[ir][1]),
+                      -round(dmjds[idx]*rates[ir][0]))
+            c[0, 0, idx] = torch.roll(im_datas[0, 0, idx],
                                      shifts=shifts, dims=[0, 1])
-            cv[0, 0, id] = torch.roll(inv_vars[0, 0, id],
+            cv[0, 0, idx] = torch.roll(inv_vars[0, 0, idx],
                                       shifts=shifts, dims=[0, 1])
 
         arg_mins = torch.zeros(len(detections), dtype=torch.uint32)
-        for id in w[0]:
-            (x, y) = detections[id, :2]
+        for idx in w[0]:
+            (x, y) = detections[idx, :2]
             x = int(x) + khw
             # array of scaled brightnesses in steps of brightness*test_low
             # to brightness*test_high
             y = int(y) + khw
-            nb = nb_ref*detections[id, 4]
+            nb = nb_ref*detections[idx, 4]
             k = kernel.repeat((1, n_bright_test, 1, 1, 1))
             for ib in range(nb.size()[0]):
                 k[:, ib, :, :, :] *= nb[ib]
@@ -178,7 +178,7 @@ def brightness_filter(im_datas, inv_vars, c, cv, kernel,
                 (1, n_bright_test, 1, 1, 1))
 
             tmp = torch.sum(diff, (0, 2, 3, 4))
-            arg_mins[id] = torch.argmin(tmp)
+            arg_mins[idx] = torch.argmin(tmp)
 
         arg_mins_cpu = arg_mins.cpu()
 
@@ -221,13 +221,13 @@ def create_stamps(im_datas, im_masks, c, cv, dmjds, rates,
                                      rates[ir][1],
                                      rtol=inexact_rtol)))
 
-        for id in range(1, len(dmjds)):
-            shifts = (-round(dmjds[id]*rates[ir][1]),
-                      -round(dmjds[id]*rates[ir][0]))
-            c[0, 0, id] = torch.roll(im_datas[0, 0, id],
+        for idx in range(1, len(dmjds)):
+            shifts = (-round(dmjds[idx]*rates[ir][1]),
+                      -round(dmjds[idx]*rates[ir][0]))
+            c[0, 0, idx] = torch.roll(im_datas[0, 0, idx],
                                      shifts=shifts, dims=[0, 1])
             # mask values with 1 are GOOD pixels
-            cv[0, 0, id] = torch.roll(im_masks[0, 0, id],
+            cv[0, 0, idx] = torch.roll(im_masks[0, 0, idx],
                                       shifts=shifts, dims=[0, 1])
         mean_stamp_frame = torch.sum(c, 2)
 
@@ -388,7 +388,7 @@ def position_filter(clust_detections, clust_stamps, im_datas,
     keeps = []
     for ir in range(len(rates)):
         if use_index:
-            w = np.where(clust_detections[:, 2] == ir)
+            w = np.where(np.round(clust_detections[:, 2]).astype("int") == ir)
         elif exact_check:
             w = np.where((clust_detections[:, 2] == rates[ir][0]) &
                          (clust_detections[:, 3] == rates[ir][1]))
@@ -402,23 +402,23 @@ def position_filter(clust_detections, clust_stamps, im_datas,
         if len(w[0]) == 0:
             continue
 
-        for id in range(1, len(dmjds)):
-            shifts = (-round(dmjds[id]*rates[ir][1]),
-                      -round(dmjds[id]*rates[ir][0]))
-            c[0, 0, id] = torch.roll(im_datas[0, 0, id],
+        for idx in range(1, len(dmjds)):
+            shifts = (-round(dmjds[idx]*rates[ir][1]),
+                      -round(dmjds[idx]*rates[ir][0]))
+            c[0, 0, idx] = torch.roll(im_datas[0, 0, idx],
                                      shifts=shifts,
                                      dims=[0, 1])
-            cv[0, 0, id] = torch.roll(inv_vars[0, 0, id],
+            cv[0, 0, idx] = torch.roll(inv_vars[0, 0, idx],
                                       shifts=shifts,
                                       dims=[0, 1])
 
-        for id in w[0]:
+        for idx in w[0]:
 
-            (x, y) = clust_detections[id, :2]
+            (x, y) = clust_detections[idx, :2]
             x = int(x)  # +khw
             y = int(y)  # +khw
 
-            K = k*clust_detections[id, 4]
+            K = k*clust_detections[idx, 4]
 
             diff = c[:, :, :, y:y+khw*2, x:x+khw*2].repeat(
                 (1, n_o*n_o, 1, 1, 1))
@@ -433,7 +433,7 @@ def position_filter(clust_detections, clust_stamps, im_datas,
             min_ix -= n_offsets
             min_iy -= n_offsets
             if arg_min not in danger_edges:
-                keeps.append(id)
+                keeps.append(idx)
 
     keeps = np.array(keeps)
     grid_detections = clust_detections[keeps]
@@ -486,7 +486,7 @@ def brightness_filter_fast(im_datas, inv_vars, c, cv, kernel,
     for ir in range(len(rates)):
         t1 = time.time()
         if use_index:
-            W = np.where(detections[:, 2] == ir)
+            W = np.where(np.round(detections[:, 2]).astype("int") == ir)
         elif exact_check:
             W = np.where((detections[:, 2] == rates[ir][0]) &
                          (detections[:, 3] == rates[ir][1]))
@@ -502,13 +502,13 @@ def brightness_filter_fast(im_datas, inv_vars, c, cv, kernel,
             continue
 
         # Roll images for this rate
-        for id in range(1, n_im):
-            shifts = (-round(dmjds[id]*rates[ir][1]),
-                      -round(dmjds[id]*rates[ir][0]))
-            c[0, 0, id] = torch.roll(im_datas[0, 0, id],
+        for idx in range(1, n_im):
+            shifts = (-round(dmjds[idx]*rates[ir][1]),
+                      -round(dmjds[idx]*rates[ir][0]))
+            c[0, 0, idx] = torch.roll(im_datas[0, 0, idx],
                                      shifts=shifts,
                                      dims=[0, 1])
-            cv[0, 0, id] = torch.roll(inv_vars[0, 0, id],
+            cv[0, 0, idx] = torch.roll(inv_vars[0, 0, idx],
                                       shifts=shifts,
                                       dims=[0, 1])
 
@@ -661,15 +661,15 @@ def run_shifts_topk(datas, inv_variances, rates, dmjds, min_snr, n_keep,
         sum_phi = torch.zeros((A, B), dtype=work_dtype, device=device)
         sum_alpha = torch.zeros((A, B), dtype=work_dtype, device=device)
 
-        for id in range(n_im):
-            if id == 0:
-                psi = datas[0, 0, id]
-                phi = inv_variances[0, 0, id]
+        for idx in range(n_im):
+            if idx == 0:
+                psi = datas[0, 0, idx]
+                phi = inv_variances[0, 0, idx]
             else:
-                shifts = (-round(dmjds[id] * rate[1]),
-                          -round(dmjds[id] * rate[0]))
-                psi = torch.roll(datas[0, 0, id], shifts=shifts, dims=[0, 1])
-                phi = torch.roll(inv_variances[0, 0, id],
+                shifts = (-round(dmjds[idx] * rate[1]),
+                          -round(dmjds[idx] * rate[0]))
+                psi = torch.roll(datas[0, 0, idx], shifts=shifts, dims=[0, 1])
+                phi = torch.roll(inv_variances[0, 0, idx],
                                  shifts=shifts, dims=[0, 1])
 
             psi = psi.to(work_dtype)
