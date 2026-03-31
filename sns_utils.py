@@ -3,6 +3,8 @@ import logging
 import numpy as np
 import time
 import torch
+from astropy.io import fits
+from pathlib import Path
 from sns_data_nh import get_device
 
 
@@ -29,9 +31,9 @@ def run_shifts(datas, inv_variances, rates, dmjds, min_snr, n_keep=4,
             shifts = (-round(dmjds[idx]*rates[ir][1]),
                       -round(dmjds[idx]*rates[ir][0]))
             c[0, 0, idx,] = torch.roll(datas[0, 0, idx],
-                                      shifts=shifts, dims=[0, 1])
+                                       shifts=shifts, dims=[0, 1])
             cv[0, 0, idx] = torch.roll(inv_variances[0, 0, idx],
-                                      shifts=shifts, dims=[0, 1])
+                                       shifts=shifts, dims=[0, 1])
         # C = functional.conv3d(c, kernel)
         # sums = torch.sum(functional.conv3d(c, ones,padding='same'), 2)
 
@@ -77,8 +79,7 @@ def run_shifts(datas, inv_variances, rates, dmjds, min_snr, n_keep=4,
 
 
 def trim_negative_snr(snr_image, alpha_image, sort_inds,
-                      n_keep, rates, A, B, use_index=False,
-                      dtype=np.float16):
+                      n_keep, A, B, dtype=np.float16):
     # trim the negative SNR sources. The reason these show up is
     # because the likelihood formalism sucks
     idx, idy = np.meshgrid(np.arange(B), np.arange(A))
@@ -97,12 +98,8 @@ def trim_negative_snr(snr_image, alpha_image, sort_inds,
             keeps = np.zeros((len(inds), 7), dtype=dtype)
             keeps[:, 0] = idx[inds]
             keeps[:, 1] = idy[inds]
-            if use_index:
-                keeps[:, 2] = s.reshape(A*B)[inds]
-                keeps[:, 3] = 0.0
-            else:
-                keeps[:, 2] = rates[s.reshape(A*B)[inds], 0]
-                keeps[:, 3] = rates[s[inds], 1]
+            keeps[:, 2] = s.reshape(A*B)[inds]
+            keeps[:, 3] = 0.0
             keeps[:, 4] = alpha.reshape(A*B)[inds]
             keeps[:, 5] = SNR.reshape(A*B)[inds]
         else:
@@ -110,12 +107,8 @@ def trim_negative_snr(snr_image, alpha_image, sort_inds,
             logging.debug(f"Keeps size: {nkeeps.shape}")
             nkeeps[:, 0] = idx[inds]
             nkeeps[:, 1] = idy[inds]
-            if use_index:
-                nkeeps[:, 2] = s[inds]
-                nkeeps[:, 3] = 0.0
-            else:
-                nkeeps[:, 2] = rates[s.reshape(A*B)[inds], 0]
-                nkeeps[:, 3] = rates[s[inds], 1]
+            nkeeps[:, 2] = s[inds]
+            nkeeps[:, 3] = 0.0
             nkeeps[:, 4] = alpha.reshape(A*B)[inds]
             nkeeps[:, 5] = SNR.reshape(A*B)[inds]
             keeps = np.concatenate([keeps, nkeeps])
@@ -196,8 +189,7 @@ def brightness_filter(im_datas, inv_vars, c, cv, kernel,
 
 
 def create_stamps(im_datas, im_masks, c, cv, dmjds, rates,
-                  filt_detections, khw,
-                  exact_check=False, inexact_rtol=1.e-7, use_index=False):
+                  filt_detections, khw):
     mean_stamps = []
     indices = []
     # saved = False
@@ -208,18 +200,7 @@ def create_stamps(im_datas, im_masks, c, cv, dmjds, rates,
         cv[0, 0, 0] = im_masks[0, 0, 0]
 
         # t1 = time.time()
-        if use_index:
-            w = np.where(np.round(filt_detections[:, 2]).astype("int") == ir)
-        elif exact_check:
-            w = np.where((filt_detections[:, 2] == rates[ir][0]) &
-                         (filt_detections[:, 3] == rates[ir][1]))
-        else:
-            w = np.where((np.isclose(filt_detections[:, 2],
-                                     rates[ir][0],
-                                     rtol=inexact_rtol)) &
-                         (np.isclose(filt_detections[:, 3],
-                                     rates[ir][1],
-                                     rtol=inexact_rtol)))
+        w = np.where(np.round(filt_detections[:, 2]).astype("int") == ir)
 
         for idx in range(1, len(dmjds)):
             shifts = (-round(dmjds[idx]*rates[ir][1]),
@@ -362,13 +343,14 @@ def predictive_line_cluster(filt_detections, stamps, dmjds, dist_lim,
 def position_filter(clust_detections, clust_stamps, im_datas,
                     inv_vars, c, cv, kernel,
                     dmjds, rates, khw, n_offsets=5,
-                    exact_check=True, inexact_rtol=1.e-7, use_index=False):
+                    debug_detection_indices=None,
+                    debug_output_dir=None):
 
     # now apply a positional filter on the clust_detections to see
     # if the likelihood minimimum is near the centre
     # n_offsets = 5 # +- n_offsets in x and y
     n_o = n_offsets*2+1
-
+    # copy the tensor data in kernel to k with extra space for offsets
     k = kernel.repeat((1, n_o*n_o, 1, 1, 1))
 
     danger_edges = []
@@ -377,28 +359,36 @@ def position_filter(clust_detections, clust_stamps, im_datas,
         for ix in range(n_o):
             i = iy*n_o+ix
             shifts = (0, iy-n_offsets, ix-n_offsets)
+            # roll the kernel data by offset amounts and place
+            # into offset kernel tensor.  This moves centre of the
+            # kernel over a grid of size n_o x n_o positions
             k[0, i, :, :, :] = torch.roll(kernel[0, 0],
                                           shifts=shifts,
                                           dims=[0, 1, 2])
             if iy == 0 or iy == n_o-1 or ix == 0 or ix == n_o-1:
+                # if the best offset pushes to the edget then 
+                # this likely indicates the sources is not a real
+                # moving source but noise that is coherent at the shift rate
                 danger_edges.append(i)
 
+    # cv will hold the variances which will be rolled along with
+    # the image data which is in 'c'
     cv[0, 0, 0] = inv_vars[0, 0, 0]
+    c[0, 0, 0] = im_datas[0, 0, 0]
+
+    write_debug = (logging.getLogger().isEnabledFor(logging.DEBUG) and
+                   debug_detection_indices is not None and
+                   debug_output_dir is not None)
+    debug_indices = set()
+    debug_dir = None
+    if write_debug:
+        debug_indices = set(np.asarray(debug_detection_indices, dtype=int))
+        debug_dir = Path(debug_output_dir)
+        debug_dir.mkdir(parents=True, exist_ok=True)
 
     keeps = []
     for ir in range(len(rates)):
-        if use_index:
-            w = np.where(np.round(clust_detections[:, 2]).astype("int") == ir)
-        elif exact_check:
-            w = np.where((clust_detections[:, 2] == rates[ir][0]) &
-                         (clust_detections[:, 3] == rates[ir][1]))
-        else:
-            w = np.where((np.isclose(clust_detections[:, 2],
-                                     rates[ir][0],
-                                     rtol=inexact_rtol)) &
-                         (np.isclose(clust_detections[:, 3],
-                                     rates[ir][1],
-                                     rtol=inexact_rtol)))
+        w = np.where(np.round(clust_detections[:, 2]).astype("int") == ir)
         if len(w[0]) == 0:
             continue
 
@@ -406,11 +396,11 @@ def position_filter(clust_detections, clust_stamps, im_datas,
             shifts = (-round(dmjds[idx]*rates[ir][1]),
                       -round(dmjds[idx]*rates[ir][0]))
             c[0, 0, idx] = torch.roll(im_datas[0, 0, idx],
-                                     shifts=shifts,
-                                     dims=[0, 1])
-            cv[0, 0, idx] = torch.roll(inv_vars[0, 0, idx],
                                       shifts=shifts,
                                       dims=[0, 1])
+            cv[0, 0, idx] = torch.roll(inv_vars[0, 0, idx],
+                                       shifts=shifts,
+                                       dims=[0, 1])
 
         for idx in w[0]:
 
@@ -419,12 +409,14 @@ def position_filter(clust_detections, clust_stamps, im_datas,
             y = int(y)  # +khw
 
             K = k*clust_detections[idx, 4]
+            c_patch = c[:, :, :, y:y+khw*2, x:x+khw*2]
+            cv_patch = cv[:, :, :, y:y+khw*2, x:x+khw*2]
 
-            diff = c[:, :, :, y:y+khw*2, x:x+khw*2].repeat(
+            diff = c_patch.repeat(
                 (1, n_o*n_o, 1, 1, 1))
             diff -= K
             diff = diff**2
-            diff *= cv[:, :, :, y:y+khw*2, x:x+khw*2].repeat(
+            diff *= cv_patch.repeat(
                 (1, n_o*n_o, 1, 1, 1))
             arg_min = torch.argmin(torch.sum(diff, (0, 2, 3, 4)))
             min_ix = arg_min % n_o
@@ -432,8 +424,40 @@ def position_filter(clust_detections, clust_stamps, im_datas,
 
             min_ix -= n_offsets
             min_iy -= n_offsets
-            if arg_min not in danger_edges:
+            logging.debug((f"position 'Xi^2' match for sources at {x},{y} at rate:"
+                           f"{rates[ir]} is offset {min_ix},{min_iy}"))
+            kept = arg_min not in danger_edges
+            if kept:
                 keeps.append(idx)
+            if write_debug and idx in debug_indices:
+                primary = fits.PrimaryHDU()
+                primary.header['DETIDX'] = int(idx)
+                primary.header['RATEIDX'] = int(ir)
+                primary.header['X'] = float(clust_detections[idx, 0])
+                primary.header['Y'] = float(clust_detections[idx, 1])
+                primary.header['FLUX'] = float(clust_detections[idx, 4])
+                primary.header['SNR'] = float(clust_detections[idx, 5])
+                primary.header['ARGMIN'] = int(arg_min)
+                primary.header['MINIX'] = int(min_ix)
+                primary.header['MINIY'] = int(min_iy)
+                primary.header['KEPT'] = int(kept)
+                hdus = [primary,
+                        fits.ImageHDU(
+                            np.asarray(c_patch.detach().cpu().squeeze(0).squeeze(0),
+                                       dtype=np.float32),
+                            name='C'),
+                        fits.ImageHDU(
+                            np.asarray(cv_patch.detach().cpu().squeeze(0).squeeze(0),
+                                       dtype=np.float32),
+                            name='CV'),
+                        fits.ImageHDU(
+                            np.asarray(diff.detach().cpu().squeeze(0),
+                                       dtype=np.float32),
+                            name='DIFF')]
+                dump_path = debug_dir / f'position_filter_det_{int(idx):05d}.fits'
+                fits.HDUList(hdus).writeto(dump_path, overwrite=True)
+                logging.debug("Wrote position_filter debug cubes to %s",
+                              dump_path)
 
     keeps = np.array(keeps)
     grid_detections = clust_detections[keeps]
@@ -453,9 +477,6 @@ def brightness_filter_fast(im_datas, inv_vars, c, cv, kernel,
                            dmjds, rates, detections, khw, n_im,
                            n_bright_test=10, test_high=1.15,
                            test_low=0.85,
-                           exact_check=True,
-                           inexact_rtol=1.e-7,
-                           use_index=False,
                            n_det_iter=200,
                            word_dtype=torch.float16):
 
@@ -485,18 +506,7 @@ def brightness_filter_fast(im_datas, inv_vars, c, cv, kernel,
 
     for ir in range(len(rates)):
         t1 = time.time()
-        if use_index:
-            W = np.where(np.round(detections[:, 2]).astype("int") == ir)
-        elif exact_check:
-            W = np.where((detections[:, 2] == rates[ir][0]) &
-                         (detections[:, 3] == rates[ir][1]))
-        else:
-            W = np.where((np.isclose(detections[:, 2],
-                                     rates[ir][0],
-                                     rtol=inexact_rtol)) &
-                         (np.isclose(detections[:, 3],
-                                     rates[ir][1],
-                                     rtol=inexact_rtol)))
+        W = np.where(np.round(detections[:, 2]).astype("int") == ir)
 
         if len(W[0]) == 0:
             continue
@@ -726,7 +736,6 @@ def run_shifts_topk(datas, inv_variances, rates, dmjds, min_snr, n_keep,
 
 def topk_to_detections(top_snr, top_alpha, top_rate_idx,
                        rates,
-                       use_index=False,
                        dtype=np.float16):
     """Convert top-k cubes into detection table compatible with sns_utils."""
     if top_snr.shape[0] == 0:
@@ -754,12 +763,8 @@ def topk_to_detections(top_snr, top_alpha, top_rate_idx,
         nkeeps = np.zeros((keep.sum(), 7), dtype=dtype)
         nkeeps[:, 0] = idx[keep]
         nkeeps[:, 1] = idy[keep]
-        if use_index:
-            nkeeps[:, 2] = s[keep]
-            nkeeps[:, 3] = 0.0
-        else:
-            nkeeps[:, 2] = rates[s[keep], 0]
-            nkeeps[:, 3] = rates[s[keep], 1]
+        nkeeps[:, 2] = s[keep]
+        nkeeps[:, 3] = 0.0
         nkeeps[:, 4] = alpha[keep]
         nkeeps[:, 5] = snr[keep]
         chunks.append(nkeeps)
