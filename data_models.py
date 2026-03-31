@@ -1,5 +1,5 @@
 from astropy.io import fits
-from astropy.table import Table
+from astropy.table import Table, vstack
 from astropy.wcs import WCS
 from dataclasses import dataclass, field, asdict
 import json
@@ -303,19 +303,27 @@ class ExtractedDataModel(object):
         """
         if self._plants is not None:
             return self._plants
-        plant_filename = "_".join([self.dataset_type,
-                                   str(self.ref_visit),
-                                   str(self.chip)])
-        plant_filename = f"{self.path}/{plant_filename}.plantList"
-        plants = Table.read(plant_filename, format='ascii.commented_header')
-        x0, y0 = self.ref_wcs.all_world2pix(plants['ra'], plants['dec'], 0)
-        plants['x0'] = x0
-        plants['y0'] = y0
-        ra1 = plants['ra'] + plants['rate_ra']/3600.0
-        dec1 = plants['dec'] + plants['rate_dec']/3600.0
-        x1, y1 = self.ref_wcs.all_world2pix(ra1, dec1, 0)
-        plants['rate_x'] = (x1-x0)*24.0
-        plants['rate_y'] = (y1-y0)*24.0
-        plants.sort('mag')
-        self._plants = plants
+        plants_list = []
+        path = "/".join([self.base_dir,
+                         self.collections,
+                         self.day_obs,
+                         "*"])
+        plant_pattern = "_".join([self.dataset_type,
+                                  str(self.ref_visit),
+                                  "*"])
+        plant_pattern = f"{path}/{plant_pattern}.plantList"
+        for plant_filename in glob(plant_pattern):
+            plants = Table.read(plant_filename, format='ascii.commented_header')
+            x0, y0 = self.ref_wcs.all_world2pix(plants['ra'], plants['dec'], 0)
+            plants['x0'] = x0
+            plants['y0'] = y0
+            ra1 = plants['ra'] + plants['rate_ra']/3600.0
+            dec1 = plants['dec'] + plants['rate_dec']/3600.0
+            x1, y1 = self.ref_wcs.all_world2pix(ra1, dec1, 0)
+            plants['rate_x'] = (x1-x0)*24.0
+            plants['rate_y'] = (y1-y0)*24.0
+            plants.sort('mag')
+            plants_list.append(plants)
+        self._plants = vstack(plants_list)
+        self._plants.sort('mag')
         return self._plants
