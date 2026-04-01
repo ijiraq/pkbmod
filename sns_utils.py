@@ -1,39 +1,55 @@
 import gc
 import logging
-import numpy as np
 import time
+from pathlib import Path
+
+import numpy as np
 import torch
 from astropy.io import fits
-from pathlib import Path
+
 from sns_data_nh import get_device
 
 
-def run_shifts(datas, inv_variances, rates, dmjds, min_snr, n_keep=4,
-               writeTestImages=False, tile_w=256,
-               word_dtype=torch.float16):
+def run_shifts(
+    datas,
+    inv_variances,
+    rates,
+    dmjds,
+    min_snr,
+    n_keep=4,
+    writeTestImages=False,
+    tile_w=256,
+    word_dtype=torch.float16,
+):
     n_im = len(datas[0, 0, :])
-    logging.debug(f'NUM IM {n_im}')
+    logging.debug(f"NUM IM {n_im}")
     c = torch.zeros_like(datas)
     c[0, 0, 0] = datas[0, 0, 0]
     cv = torch.zeros_like(datas)
     cv[0, 0, 0] = inv_variances[0, 0, 0]
 
-    snr_image = torch.zeros((1, 1,
-                             len(rates), datas.size()[3], datas.size()[4]),
-                            dtype=word_dtype)
-    alpha_image = torch.zeros((1, 1,
-                              len(rates), datas.size()[3], datas.size()[4]),
-                              dtype=word_dtype)
+    snr_image = torch.zeros(
+        (1, 1, len(rates), datas.size()[3], datas.size()[4]), dtype=word_dtype
+    )
+    alpha_image = torch.zeros(
+        (1, 1, len(rates), datas.size()[3], datas.size()[4]), dtype=word_dtype
+    )
 
     # rates=[[-200.6777606841237, 78.88276756451387]]
     for ir in range(len(rates)):
         for idx in range(1, n_im):
-            shifts = (-round(dmjds[idx]*rates[ir][1]),
-                      -round(dmjds[idx]*rates[ir][0]))
-            c[0, 0, idx,] = torch.roll(datas[0, 0, idx],
-                                       shifts=shifts, dims=[0, 1])
-            cv[0, 0, idx] = torch.roll(inv_variances[0, 0, idx],
-                                       shifts=shifts, dims=[0, 1])
+            shifts = (
+                -round(dmjds[idx] * rates[ir][1]),
+                -round(dmjds[idx] * rates[ir][0]),
+            )
+            c[
+                0,
+                0,
+                idx,
+            ] = torch.roll(datas[0, 0, idx], shifts=shifts, dims=[0, 1])
+            cv[0, 0, idx] = torch.roll(
+                inv_variances[0, 0, idx], shifts=shifts, dims=[0, 1]
+            )
         # C = functional.conv3d(c, kernel)
         # sums = torch.sum(functional.conv3d(c, ones,padding='same'), 2)
 
@@ -44,11 +60,11 @@ def run_shifts(datas, inv_variances, rates, dmjds, min_snr, n_keep=4,
         # median_alpha = torch.median(PSI/PHI, dim=2)[0]
         # doesn't seem to be used for anything
 
-        alpha = torch.nansum(PSI/PHI, 2)  # flux estimate
+        alpha = torch.nansum(PSI / PHI, 2)  # flux estimate
         alpha = torch.nan_to_num(alpha, 0.0)
 
         # SNR estimate
-        nu = torch.sum(PSI, 2)/torch.pow(torch.sum(PHI, 2), 0.5)
+        nu = torch.sum(PSI, 2) / torch.pow(torch.sum(PHI, 2), 0.5)
         nu = torch.nan_to_num(nu, -1.0)
 
         # check to see if making all snr==inf go to zero fixes the
@@ -60,16 +76,18 @@ def run_shifts(datas, inv_variances, rates, dmjds, min_snr, n_keep=4,
         inds = where.nonzero()
 
         snr_image[0, 0, ir, inds[:, 0], inds[:, 1]] = (
-            nu[0, 0, inds[:, 0], inds[:, 1]].cpu().to(word_dtype))
+            nu[0, 0, inds[:, 0], inds[:, 1]].cpu().to(word_dtype)
+        )
         # flux per image not per stack
         alpha_image[0, 0, ir, inds[:, 0], inds[:, 1]] = (
-            alpha[0, 0, inds[:, 0], inds[:, 1]].cpu()/n_im)
+            alpha[0, 0, inds[:, 0], inds[:, 1]].cpu() / n_im
+        )
 
         gc.collect()
         torch.cuda.empty_cache()
 
-    logging.info(f'Max per image flux of candidates: {torch.max(alpha_image)}')
-    logging.info(f'Max per image snr of candidates: {torch.max(snr_image)}')
+    logging.info(f"Max per image flux of candidates: {torch.max(alpha_image)}")
+    logging.info(f"Max per image snr of candidates: {torch.max(snr_image)}")
 
     del c, cv, datas, inv_variances, PSI, PHI
     gc.collect()
@@ -78,15 +96,16 @@ def run_shifts(datas, inv_variances, rates, dmjds, min_snr, n_keep=4,
     return snr_image, alpha_image
 
 
-def trim_negative_snr(snr_image, alpha_image, sort_inds,
-                      n_keep, A, B, dtype=np.float16):
+def trim_negative_snr(
+    snr_image, alpha_image, sort_inds, n_keep, A, B, dtype=np.float16
+):
     # trim the negative SNR sources. The reason these show up is
     # because the likelihood formalism sucks
     idx, idy = np.meshgrid(np.arange(B), np.arange(A))
-    idx = idx.reshape(A*B)
-    idy = idy.reshape(A*B)
+    idx = idx.reshape(A * B)
+    idy = idy.reshape(A * B)
     for n in range(n_keep):
-        s = sort_inds[0, 0, n, :, :].reshape(A*B)
+        s = sort_inds[0, 0, n, :, :].reshape(A * B)
         SNR = snr_image[0, 0, s, idy, idx]
         alpha = alpha_image[0, 0, s, idy, idx]
 
@@ -98,10 +117,10 @@ def trim_negative_snr(snr_image, alpha_image, sort_inds,
             keeps = np.zeros((len(inds), 7), dtype=dtype)
             keeps[:, 0] = idx[inds]
             keeps[:, 1] = idy[inds]
-            keeps[:, 2] = s.reshape(A*B)[inds]
+            keeps[:, 2] = s.reshape(A * B)[inds]
             keeps[:, 3] = 0.0
-            keeps[:, 4] = alpha.reshape(A*B)[inds]
-            keeps[:, 5] = SNR.reshape(A*B)[inds]
+            keeps[:, 4] = alpha.reshape(A * B)[inds]
+            keeps[:, 5] = SNR.reshape(A * B)[inds]
         else:
             nkeeps = np.zeros((len(inds), 7), dtype=dtype)
             logging.debug(f"Keeps size: {nkeeps.shape}")
@@ -109,11 +128,11 @@ def trim_negative_snr(snr_image, alpha_image, sort_inds,
             nkeeps[:, 1] = idy[inds]
             nkeeps[:, 2] = s[inds]
             nkeeps[:, 3] = 0.0
-            nkeeps[:, 4] = alpha.reshape(A*B)[inds]
-            nkeeps[:, 5] = SNR.reshape(A*B)[inds]
+            nkeeps[:, 4] = alpha.reshape(A * B)[inds]
+            nkeeps[:, 5] = SNR.reshape(A * B)[inds]
             keeps = np.concatenate([keeps, nkeeps])
 
-    logging.info(f'Keeping {len(keeps)} candidates')
+    logging.info(f"Keeping {len(keeps)} candidates")
 
     detections = np.array(keeps)
     del keeps, idx, idy
@@ -123,33 +142,46 @@ def trim_negative_snr(snr_image, alpha_image, sort_inds,
 def trim_negative_flux(detections):
     pos = np.where(detections[:, 4] > 0)
     detections = detections[pos]
-    logging.info(f'Keeping {len(detections)} positive flux candidates')
+    logging.info(f"Keeping {len(detections)} positive flux candidates")
     return detections
 
 
-def brightness_filter(im_datas, inv_vars, c, cv, kernel,
-                      dmjds, rates, detections, khw, n_im,
-                      n_bright_test=10, test_high=1.15, test_low=0.85):
+def brightness_filter(
+    im_datas,
+    inv_vars,
+    c,
+    cv,
+    kernel,
+    dmjds,
+    rates,
+    detections,
+    khw,
+    n_im,
+    n_bright_test=10,
+    test_high=1.15,
+    test_low=0.85,
+):
 
     device = get_device()
-    nb_ref = torch.as_tensor(10.0**np.linspace(np.log10(test_low),
-                                               np.log10(test_high),
-                                               n_bright_test),
-                             dtype=im_datas.dtype,
-                             device=device)
+    nb_ref = torch.as_tensor(
+        10.0 ** np.linspace(np.log10(test_low), np.log10(test_high), n_bright_test),
+        dtype=im_datas.dtype,
+        device=device,
+    )
 
     for ir in range(len(rates)):
         t1 = time.time()
-        w = np.where((detections[:, 2] == rates[ir][0]) &
-                     (detections[:, 3] == rates[ir][1]))
+        w = np.where(
+            (detections[:, 2] == rates[ir][0]) & (detections[:, 3] == rates[ir][1])
+        )
 
         for idx in range(1, n_im):
-            shifts = (-round(dmjds[idx]*rates[ir][1]),
-                      -round(dmjds[idx]*rates[ir][0]))
-            c[0, 0, idx] = torch.roll(im_datas[0, 0, idx],
-                                     shifts=shifts, dims=[0, 1])
-            cv[0, 0, idx] = torch.roll(inv_vars[0, 0, idx],
-                                      shifts=shifts, dims=[0, 1])
+            shifts = (
+                -round(dmjds[idx] * rates[ir][1]),
+                -round(dmjds[idx] * rates[ir][0]),
+            )
+            c[0, 0, idx] = torch.roll(im_datas[0, 0, idx], shifts=shifts, dims=[0, 1])
+            cv[0, 0, idx] = torch.roll(inv_vars[0, 0, idx], shifts=shifts, dims=[0, 1])
 
         arg_mins = torch.zeros(len(detections), dtype=torch.uint32)
         for idx in w[0]:
@@ -158,43 +190,51 @@ def brightness_filter(im_datas, inv_vars, c, cv, kernel,
             # array of scaled brightnesses in steps of brightness*test_low
             # to brightness*test_high
             y = int(y) + khw
-            nb = nb_ref*detections[idx, 4]
+            nb = nb_ref * detections[idx, 4]
             k = kernel.repeat((1, n_bright_test, 1, 1, 1))
             for ib in range(nb.size()[0]):
                 k[:, ib, :, :, :] *= nb[ib]
 
-            diff = c[:, :, :, y-khw:y+khw, x-khw:x+khw].repeat(
-                (1, n_bright_test, 1, 1, 1))
+            diff = c[:, :, :, y - khw : y + khw, x - khw : x + khw].repeat(
+                (1, n_bright_test, 1, 1, 1)
+            )
             diff -= k
-            diff = diff*diff
-            diff *= cv[:, :, :, y-khw:y+khw, x-khw:x+khw].repeat(
-                (1, n_bright_test, 1, 1, 1))
+            diff = diff * diff
+            diff *= cv[:, :, :, y - khw : y + khw, x - khw : x + khw].repeat(
+                (1, n_bright_test, 1, 1, 1)
+            )
 
             tmp = torch.sum(diff, (0, 2, 3, 4))
             arg_mins[idx] = torch.argmin(tmp)
 
         arg_mins_cpu = arg_mins.cpu()
 
-        W = np.where((arg_mins_cpu != 0) & (arg_mins_cpu != (n_bright_test-1)))
-        logging.debug((f'{ir+1}/{len(rates)}, pre: {len(w[0])}, '
-                       f'post: {len(W[0])},  in time {time.time()-t1}'))
+        W = np.where((arg_mins_cpu != 0) & (arg_mins_cpu != (n_bright_test - 1)))
+        logging.debug(
+            (
+                f"{ir + 1}/{len(rates)}, pre: {len(w[0])}, "
+                f"post: {len(W[0])},  in time {time.time() - t1}"
+            )
+        )
         if ir == 0:
             keeps = W[0]
         else:
             keeps = np.concatenate([keeps, W[0]])
-    logging.info((f'Number kept after brightness filter {len(keeps)}'
-                  f' of {len(detections)} total detections.'))
+    logging.info(
+        (
+            f"Number kept after brightness filter {len(keeps)}"
+            f" of {len(detections)} total detections."
+        )
+    )
 
     return keeps
 
 
-def create_stamps(im_datas, im_masks, c, cv, dmjds, rates,
-                  filt_detections, khw):
+def create_stamps(im_datas, im_masks, c, cv, dmjds, rates, filt_detections, khw):
     mean_stamps = []
     indices = []
     # saved = False
     for ir in range(len(rates)):
-
         # these are required to reset from the nans below
         c[0, 0, 0] = im_datas[0, 0, 0]
         cv[0, 0, 0] = im_masks[0, 0, 0]
@@ -203,20 +243,22 @@ def create_stamps(im_datas, im_masks, c, cv, dmjds, rates,
         w = np.where(np.round(filt_detections[:, 2]).astype("int") == ir)
 
         for idx in range(1, len(dmjds)):
-            shifts = (-round(dmjds[idx]*rates[ir][1]),
-                      -round(dmjds[idx]*rates[ir][0]))
-            c[0, 0, idx] = torch.roll(im_datas[0, 0, idx],
-                                     shifts=shifts, dims=[0, 1])
+            shifts = (
+                -round(dmjds[idx] * rates[ir][1]),
+                -round(dmjds[idx] * rates[ir][0]),
+            )
+            c[0, 0, idx] = torch.roll(im_datas[0, 0, idx], shifts=shifts, dims=[0, 1])
             # mask values with 1 are GOOD pixels
-            cv[0, 0, idx] = torch.roll(im_masks[0, 0, idx],
-                                      shifts=shifts, dims=[0, 1])
+            cv[0, 0, idx] = torch.roll(im_masks[0, 0, idx], shifts=shifts, dims=[0, 1])
         mean_stamp_frame = torch.sum(c, 2)
 
         mask_frame = torch.sum(cv, 2)
 
         for iw in w[0]:
-            x, y = filt_detections[iw, :2].astype('int')
-            mean_stamp = mean_stamp_frame[0, 0, y:y+khw*2+1, x:x+khw*2+1]
+            x, y = filt_detections[iw, :2].astype("int")
+            mean_stamp = mean_stamp_frame[
+                0, 0, y : y + khw * 2 + 1, x : x + khw * 2 + 1
+            ]
 
             """
             med_sections = c[0,0,:,y:y+khw*2+1, x:x+khw*2+1].cpu()
@@ -230,10 +272,12 @@ def create_stamps(im_datas, im_masks, c, cv, dmjds, rates,
             med_stamps.append(ma.median(masked_med_sections,axis=0).filled(0.0))
             """
 
-            mask = np.copy(mask_frame[0, 0, y:y+khw*2+1, x:x+khw*2+1].cpu())
+            mask = np.copy(
+                mask_frame[0, 0, y : y + khw * 2 + 1, x : x + khw * 2 + 1].cpu()
+            )
             mask[np.where((np.isnan(mask)) | (np.isinf(mask)))] = 0.0
-            np.clip(mask, 1., len(dmjds), out=mask)
-            mean_stamps.append(np.copy(mean_stamp.cpu())/mask)
+            np.clip(mask, 1.0, len(dmjds), out=mask)
+            mean_stamps.append(np.copy(mean_stamp.cpu()) / mask)
 
             indices.append(iw)
 
@@ -251,13 +295,13 @@ def create_stamps(im_datas, im_masks, c, cv, dmjds, rates,
 def peak_offset_filter(stamps, filt_detections, peak_offset_max):
     (N, a, b) = stamps.shape
     (gx, gy) = np.meshgrid(np.arange(b), np.arange(a))
-    gx = gx.reshape(a*b)
-    gy = gy.reshape(a*b)
-    rs_stamps = stamps.reshape(N, a*b)
+    gx = gx.reshape(a * b)
+    gy = gy.reshape(a * b)
+    rs_stamps = stamps.reshape(N, a * b)
     args = np.argmax(rs_stamps, axis=1)
     X = gx[args]
     Y = gy[args]
-    radial_d = ((X-b/2)**2+(Y-a/2)**2)**0.5
+    radial_d = ((X - b / 2) ** 2 + (Y - a / 2) ** 2) ** 0.5
     w = np.where(radial_d < peak_offset_max)
     filt_detections = filt_detections[w]
     stamps = stamps[w]
@@ -266,37 +310,42 @@ def peak_offset_filter(stamps, filt_detections, peak_offset_max):
 
 
 # do predictive line clustering
-def predictive_line_cluster(filt_detections, stamps, dmjds, dist_lim,
-                            min_samp=2, init_select_proc_distance=60):
+def predictive_line_cluster(
+    filt_detections, stamps, dmjds, dist_lim, min_samp=2, init_select_proc_distance=60
+):
 
     proc_filt_detections = np.copy(filt_detections)
 
-    proc_inds = np.arange(len(proc_filt_detections))
+    proc_inds = np.arange(len(proc_filt_detections), dtype=int)
     clust_detections, clust_inds = [], []
 
     while len(proc_filt_detections) > 0:
-
         arg_max = np.argmax(proc_filt_detections[:, 5])  # 5 - max on SNR
         x_o, y_o, rx_o, ry_o, f_o, snr_o = proc_filt_detections[arg_max, :6]
 
         # this secondary where command is necessary because of memory
         # overflows in large detection lists
-        w = np.where((proc_filt_detections[:, 0] >
-                      proc_filt_detections[arg_max, 0]-55)
-                     & (proc_filt_detections[:, 0] <
-                        proc_filt_detections[arg_max, 0] +
-                        init_select_proc_distance)
-                     & (proc_filt_detections[:, 1] >
-                        proc_filt_detections[arg_max, 1]-55)
-                     & (proc_filt_detections[:, 1] <
-                        proc_filt_detections[arg_max, 1] +
-                        init_select_proc_distance))
+        w = np.where(
+            (proc_filt_detections[:, 0] > proc_filt_detections[arg_max, 0] - 55)
+            & (
+                proc_filt_detections[:, 0]
+                < proc_filt_detections[arg_max, 0] + init_select_proc_distance
+            )
+            & (proc_filt_detections[:, 1] > proc_filt_detections[arg_max, 1] - 55)
+            & (
+                proc_filt_detections[:, 1]
+                < proc_filt_detections[arg_max, 1] + init_select_proc_distance
+            )
+        )
 
-        W = np.where(((proc_filt_detections[w[0], 0] -
-                       proc_filt_detections[arg_max, 0])**2 + (
-                           proc_filt_detections[w[0], 1] -
-                           proc_filt_detections[arg_max, 1])**2) <
-                     init_select_proc_distance**2)
+        W = np.where(
+            (
+                (proc_filt_detections[w[0], 0] - proc_filt_detections[arg_max, 0]) ** 2
+                + (proc_filt_detections[w[0], 1] - proc_filt_detections[arg_max, 1])
+                ** 2
+            )
+            < init_select_proc_distance**2
+        )
         w = w[0][W[0]]
 
         fd_subset = proc_filt_detections[w]
@@ -307,66 +356,75 @@ def predictive_line_cluster(filt_detections, stamps, dmjds, dist_lim,
 
         # predicted centroid  position of secondary detection shifted at the
         # differential wrong rate.
-        x_n, y_n = x_o - drx*dt[-1], y_o - dry*dt[-1]
+        x_n, y_n = x_o - drx * dt[-1], y_o - dry * dt[-1]
         # predicted centroid shifted such that best detection is now at origin
         dx, dy = (x_n - x_o), (y_n - y_o)
 
-        dxp = dx*fd_subset[:, 1]
-        dyp = dy*fd_subset[:, 0]
-        xm = x_n*y_o
-        ym = y_n*x_o
+        dxp = dx * fd_subset[:, 1]
+        dyp = dy * fd_subset[:, 0]
+        xm = x_n * y_o
+        ym = y_n * x_o
         dx2 = dx**2
         dy2 = dy**2
         top = np.abs(dyp - dxp + xm - ym)
         bottom = np.sqrt(dx2 + dy2)
-        dist = top/bottom
+        dist = top / bottom
 
-        clust = np.where((dist < dist_lim) |
-                         (np.isnan(dist)) |
-                         ((dist < dist_lim) &
-                          (drx == 0) & (dry == 0)))
+        clust = np.where(
+            (dist < dist_lim)
+            | (np.isnan(dist))
+            | ((dist < dist_lim) & (drx == 0) & (dry == 0))
+        )
         if len(clust[0]) >= min_samp:
             clust_detections.append(proc_filt_detections[arg_max])
             clust_inds.append(proc_inds[arg_max])
 
-        mask = np.ones(len(proc_filt_detections), dtype='bool')
+        mask = np.ones(len(proc_filt_detections), dtype="bool")
         mask[w[clust]] = False
         proc_filt_detections = proc_filt_detections[mask]
         proc_inds = proc_inds[mask]
 
     clust_detections = np.array(clust_detections)
-    clust_stamps = stamps[np.array(clust_inds)]
+    clust_stamps = stamps[np.array(clust_inds, dtype=int)]
 
     return clust_detections, clust_stamps
 
 
-def position_filter(clust_detections, clust_stamps, im_datas,
-                    inv_vars, c, cv, kernel,
-                    dmjds, rates, khw, n_offsets=5,
-                    debug_detection_indices=None,
-                    debug_output_dir=None):
+def position_filter(
+    clust_detections,
+    clust_stamps,
+    im_datas,
+    inv_vars,
+    c,
+    cv,
+    kernel,
+    dmjds,
+    rates,
+    khw,
+    n_offsets=5,
+    debug_detection_indices=None,
+    debug_output_dir=None,
+):
 
     # now apply a positional filter on the clust_detections to see
     # if the likelihood minimimum is near the centre
     # n_offsets = 5 # +- n_offsets in x and y
-    n_o = n_offsets*2+1
+    n_o = n_offsets * 2 + 1
     # copy the tensor data in kernel to k with extra space for offsets
-    k = kernel.repeat((1, n_o*n_o, 1, 1, 1))
+    k = kernel.repeat((1, n_o * n_o, 1, 1, 1))
 
     danger_edges = []
     # these are the indices of the maximal offsets in x and y
     for iy in range(n_o):
         for ix in range(n_o):
-            i = iy*n_o+ix
-            shifts = (0, iy-n_offsets, ix-n_offsets)
+            i = iy * n_o + ix
+            shifts = (0, iy - n_offsets, ix - n_offsets)
             # roll the kernel data by offset amounts and place
             # into offset kernel tensor.  This moves centre of the
             # kernel over a grid of size n_o x n_o positions
-            k[0, i, :, :, :] = torch.roll(kernel[0, 0],
-                                          shifts=shifts,
-                                          dims=[0, 1, 2])
-            if iy == 0 or iy == n_o-1 or ix == 0 or ix == n_o-1:
-                # if the best offset pushes to the edget then 
+            k[0, i, :, :, :] = torch.roll(kernel[0, 0], shifts=shifts, dims=[0, 1, 2])
+            if iy == 0 or iy == n_o - 1 or ix == 0 or ix == n_o - 1:
+                # if the best offset pushes to the edget then
                 # this likely indicates the sources is not a real
                 # moving source but noise that is coherent at the shift rate
                 danger_edges.append(i)
@@ -376,9 +434,11 @@ def position_filter(clust_detections, clust_stamps, im_datas,
     cv[0, 0, 0] = inv_vars[0, 0, 0]
     c[0, 0, 0] = im_datas[0, 0, 0]
 
-    write_debug = (logging.getLogger().isEnabledFor(logging.DEBUG) and
-                   debug_detection_indices is not None and
-                   debug_output_dir is not None)
+    write_debug = (
+        logging.getLogger().isEnabledFor(logging.DEBUG)
+        and debug_detection_indices is not None
+        and debug_output_dir is not None
+    )
     debug_indices = set()
     debug_dir = None
     if write_debug:
@@ -393,100 +453,125 @@ def position_filter(clust_detections, clust_stamps, im_datas,
             continue
 
         for idx in range(1, len(dmjds)):
-            shifts = (-round(dmjds[idx]*rates[ir][1]),
-                      -round(dmjds[idx]*rates[ir][0]))
-            c[0, 0, idx] = torch.roll(im_datas[0, 0, idx],
-                                      shifts=shifts,
-                                      dims=[0, 1])
-            cv[0, 0, idx] = torch.roll(inv_vars[0, 0, idx],
-                                       shifts=shifts,
-                                       dims=[0, 1])
+            shifts = (
+                -round(dmjds[idx] * rates[ir][1]),
+                -round(dmjds[idx] * rates[ir][0]),
+            )
+            c[0, 0, idx] = torch.roll(im_datas[0, 0, idx], shifts=shifts, dims=[0, 1])
+            cv[0, 0, idx] = torch.roll(inv_vars[0, 0, idx], shifts=shifts, dims=[0, 1])
 
         for idx in w[0]:
-
             (x, y) = clust_detections[idx, :2]
             x = int(x)  # +khw
             y = int(y)  # +khw
 
-            K = k*clust_detections[idx, 4]
-            c_patch = c[:, :, :, y:y+khw*2, x:x+khw*2]
-            cv_patch = cv[:, :, :, y:y+khw*2, x:x+khw*2]
+            K = k * clust_detections[idx, 4]
+            c_patch = c[:, :, :, y : y + khw * 2, x : x + khw * 2]
+            cv_patch = cv[:, :, :, y : y + khw * 2, x : x + khw * 2]
 
-            diff = c_patch.repeat(
-                (1, n_o*n_o, 1, 1, 1))
+            diff = c_patch.repeat((1, n_o * n_o, 1, 1, 1))
             diff -= K
             diff = diff**2
-            diff *= cv_patch.repeat(
-                (1, n_o*n_o, 1, 1, 1))
+            diff *= cv_patch.repeat((1, n_o * n_o, 1, 1, 1))
             arg_min = torch.argmin(torch.sum(diff, (0, 2, 3, 4)))
             min_ix = arg_min % n_o
-            min_iy = int((arg_min-min_ix)/n_o)
+            min_iy = int((arg_min - min_ix) / n_o)
 
             min_ix -= n_offsets
             min_iy -= n_offsets
-            logging.debug((f"position 'Xi^2' match for sources at {x},{y} at rate:"
-                           f"{rates[ir]} is offset {min_ix},{min_iy}"))
+            logging.debug(
+                (
+                    f"position 'Xi^2' match for sources at {x},{y} at rate:"
+                    f"{rates[ir]} is offset {min_ix},{min_iy}"
+                )
+            )
             kept = arg_min not in danger_edges
             if kept:
                 keeps.append(idx)
             if write_debug and idx in debug_indices:
                 primary = fits.PrimaryHDU()
-                primary.header['DETIDX'] = int(idx)
-                primary.header['RATEIDX'] = int(ir)
-                primary.header['X'] = float(clust_detections[idx, 0])
-                primary.header['Y'] = float(clust_detections[idx, 1])
-                primary.header['FLUX'] = float(clust_detections[idx, 4])
-                primary.header['SNR'] = float(clust_detections[idx, 5])
-                primary.header['ARGMIN'] = int(arg_min)
-                primary.header['MINIX'] = int(min_ix)
-                primary.header['MINIY'] = int(min_iy)
-                primary.header['KEPT'] = int(kept)
-                hdus = [primary,
-                        fits.ImageHDU(
-                            np.asarray(c_patch.detach().cpu().squeeze(0).squeeze(0),
-                                       dtype=np.float32),
-                            name='C'),
-                        fits.ImageHDU(
-                            np.asarray(cv_patch.detach().cpu().squeeze(0).squeeze(0),
-                                       dtype=np.float32),
-                            name='CV'),
-                        fits.ImageHDU(
-                            np.asarray(diff.detach().cpu().squeeze(0),
-                                       dtype=np.float32),
-                            name='DIFF')]
-                dump_path = debug_dir / f'position_filter_det_{int(idx):05d}.fits'
+                primary.header["DETIDX"] = int(idx)
+                primary.header["RATEIDX"] = int(ir)
+                primary.header["X"] = float(clust_detections[idx, 0])
+                primary.header["Y"] = float(clust_detections[idx, 1])
+                primary.header["FLUX"] = float(clust_detections[idx, 4])
+                primary.header["SNR"] = float(clust_detections[idx, 5])
+                primary.header["ARGMIN"] = int(arg_min)
+                primary.header["MINIX"] = int(min_ix)
+                primary.header["MINIY"] = int(min_iy)
+                primary.header["KEPT"] = int(kept)
+                hdus = [
+                    primary,
+                    fits.ImageHDU(
+                        np.asarray(
+                            c_patch.detach().cpu().squeeze(0).squeeze(0),
+                            dtype=np.float32,
+                        ),
+                        name="C",
+                    ),
+                    fits.ImageHDU(
+                        np.asarray(
+                            cv_patch.detach().cpu().squeeze(0).squeeze(0),
+                            dtype=np.float32,
+                        ),
+                        name="CV",
+                    ),
+                    fits.ImageHDU(
+                        np.asarray(diff.detach().cpu().squeeze(0), dtype=np.float32),
+                        name="DIFF",
+                    ),
+                ]
+                dump_path = debug_dir / f"position_filter_det_{int(idx):05d}.fits"
                 fits.HDUList(hdus).writeto(dump_path, overwrite=True)
-                logging.debug("Wrote position_filter debug cubes to %s",
-                              dump_path)
+                logging.debug("Wrote position_filter debug cubes to %s", dump_path)
 
     keeps = np.array(keeps)
     grid_detections = clust_detections[keeps]
     grid_stamps = clust_stamps[keeps]
     logging.debug(f"First grid {grid_detections[0]}")
     logging.debug(f"First cluster detection {clust_detections[0]}")
-    logging.info(('Number of sources kept after the cluster '
-                  f'filtering: {len(clust_detections)}.'))
+    logging.info(
+        (
+            "Number of sources kept after the cluster "
+            f"filtering: {len(clust_detections)}."
+        )
+    )
 
-    logging.info(('Number of sources kept after the positional '
-                  f'grid minimum search: {len(grid_detections)}.'))
+    logging.info(
+        (
+            "Number of sources kept after the positional "
+            f"grid minimum search: {len(grid_detections)}."
+        )
+    )
 
     return grid_detections, grid_stamps
 
 
-def brightness_filter_fast(im_datas, inv_vars, c, cv, kernel,
-                           dmjds, rates, detections, khw, n_im,
-                           n_bright_test=10, test_high=1.15,
-                           test_low=0.85,
-                           n_det_iter=200,
-                           word_dtype=torch.float16):
+def brightness_filter_fast(
+    im_datas,
+    inv_vars,
+    c,
+    cv,
+    kernel,
+    dmjds,
+    rates,
+    detections,
+    khw,
+    n_im,
+    n_bright_test=10,
+    test_high=1.15,
+    test_low=0.85,
+    n_det_iter=200,
+    word_dtype=torch.float16,
+):
 
     device = get_device()
 
-    nb_ref = torch.as_tensor(10.0**np.linspace(np.log10(test_low),
-                                               np.log10(test_high),
-                                               n_bright_test),
-                             dtype=word_dtype,
-                             device=device)
+    nb_ref = torch.as_tensor(
+        10.0 ** np.linspace(np.log10(test_low), np.log10(test_high), n_bright_test),
+        dtype=word_dtype,
+        device=device,
+    )
 
     ks = 2 * khw  # kernel spatial size
     # Precompute the unit-scaled kernel: shape (n_bright_test, n_im, ks, ks)
@@ -513,20 +598,17 @@ def brightness_filter_fast(im_datas, inv_vars, c, cv, kernel,
 
         # Roll images for this rate
         for idx in range(1, n_im):
-            shifts = (-round(dmjds[idx]*rates[ir][1]),
-                      -round(dmjds[idx]*rates[ir][0]))
-            c[0, 0, idx] = torch.roll(im_datas[0, 0, idx],
-                                     shifts=shifts,
-                                     dims=[0, 1])
-            cv[0, 0, idx] = torch.roll(inv_vars[0, 0, idx],
-                                      shifts=shifts,
-                                      dims=[0, 1])
+            shifts = (
+                -round(dmjds[idx] * rates[ir][1]),
+                -round(dmjds[idx] * rates[ir][0]),
+            )
+            c[0, 0, idx] = torch.roll(im_datas[0, 0, idx], shifts=shifts, dims=[0, 1])
+            cv[0, 0, idx] = torch.roll(inv_vars[0, 0, idx], shifts=shifts, dims=[0, 1])
 
         kept_chunks = []
         n_done_iter = 0
         while n_done_iter < len(W[0]):
-
-            w = W[0][n_done_iter:min(n_done_iter+n_det_iter, len(W[0]))]
+            w = W[0][n_done_iter : min(n_done_iter + n_det_iter, len(W[0]))]
 
             det_idx = w
             n_det = len(det_idx)
@@ -537,13 +619,11 @@ def brightness_filter_fast(im_datas, inv_vars, c, cv, kernel,
             xs = detections[det_idx, 0].astype(int) + khw
             ys = detections[det_idx, 1].astype(int) + khw
             fluxes = torch.as_tensor(
-                detections[det_idx, 4],
-                dtype=word_dtype,
-                device=device
+                detections[det_idx, 4], dtype=word_dtype, device=device
             )
 
             # Batch-extract all patches via advanced indexing
-            c_3d = c[0, 0]    # (n_im, H, W)
+            c_3d = c[0, 0]  # (n_im, H, W)
             cv_3d = cv[0, 0]  # (n_im, H, W)
 
             ys_t = torch.tensor(ys, device=device, dtype=torch.long)
@@ -557,8 +637,8 @@ def brightness_filter_fast(im_datas, inv_vars, c, cv, kernel,
             x_exp = x_idx[:, None, None, :].expand(n_det, n_im, ks, ks)
             im_exp = im_idx[None, :, None, None].expand(n_det, n_im, ks, ks)
 
-            patches_c = c_3d[im_exp, y_exp, x_exp]   # (n_det, n_im, ks, ks)
-            patches_cv = cv_3d[im_exp, y_exp, x_exp]   # (n_det, n_im, ks, ks)
+            patches_c = c_3d[im_exp, y_exp, x_exp]  # (n_det, n_im, ks, ks)
+            patches_cv = cv_3d[im_exp, y_exp, x_exp]  # (n_det, n_im, ks, ks)
 
             # Exploit argmin scale-invariance:
             # argmin((p - k*f)^2 * w) == argmin((p/f - k)^2 * w)
@@ -632,16 +712,27 @@ def brightness_filter_fast(im_datas, inv_vars, c, cv, kernel,
     else:
         keeps = np.array([], dtype=np.intp)
 
-    logging.info((f'Number kept after brightness filter {len(keeps)} '
-                  f'of {len(detections)} total detections.'))
+    logging.info(
+        (
+            f"Number kept after brightness filter {len(keeps)} "
+            f"of {len(detections)} total detections."
+        )
+    )
 
     return keeps
 
 
-def run_shifts_topk(datas, inv_variances, rates, dmjds, min_snr, n_keep,
-                    tile_w=256,
-                    work_dtype=torch.float16,
-                    output_dtype=torch.float16):
+def run_shifts_topk(
+    datas,
+    inv_variances,
+    rates,
+    dmjds,
+    min_snr,
+    n_keep,
+    tile_w=256,
+    work_dtype=torch.float16,
+    output_dtype=torch.float16,
+):
     """Run shift-and-stack in low-memory mode and keep online per-pixel top-k.
 
     Do PHI/PSI sums in loop instead, keeps GPU limited to one image foot print
@@ -660,11 +751,9 @@ def run_shifts_topk(datas, inv_variances, rates, dmjds, min_snr, n_keep,
     if k <= 0:
         raise ValueError(f"n_keep: {n_keep} and N rates: {len(rates)}")
 
-    top_snr_cpu = torch.full((k, A, B), -float("inf"),
-                             dtype=output_dtype, device="cpu")
+    top_snr_cpu = torch.full((k, A, B), -float("inf"), dtype=output_dtype, device="cpu")
     top_alpha_cpu = torch.zeros((k, A, B), dtype=output_dtype, device="cpu")
-    top_rate_idx_cpu = torch.full((k, A, B), -1,
-                                  dtype=torch.int32, device="cpu")
+    top_rate_idx_cpu = torch.full((k, A, B), -1, dtype=torch.int32, device="cpu")
 
     for ir, rate in enumerate(rates):
         sum_psi = torch.zeros((A, B), dtype=work_dtype, device=device)
@@ -676,25 +765,22 @@ def run_shifts_topk(datas, inv_variances, rates, dmjds, min_snr, n_keep,
                 psi = datas[0, 0, idx]
                 phi = inv_variances[0, 0, idx]
             else:
-                shifts = (-round(dmjds[idx] * rate[1]),
-                          -round(dmjds[idx] * rate[0]))
+                shifts = (-round(dmjds[idx] * rate[1]), -round(dmjds[idx] * rate[0]))
                 psi = torch.roll(datas[0, 0, idx], shifts=shifts, dims=[0, 1])
-                phi = torch.roll(inv_variances[0, 0, idx],
-                                 shifts=shifts, dims=[0, 1])
+                phi = torch.roll(inv_variances[0, 0, idx], shifts=shifts, dims=[0, 1])
 
             psi = psi.to(work_dtype)
             phi = phi.to(work_dtype)
             sum_psi += psi
             sum_phi += phi
-            sum_alpha += torch.nan_to_num(
-                psi / phi, nan=0.0, posinf=0.0, neginf=0.0)
+            sum_alpha += torch.nan_to_num(psi / phi, nan=0.0, posinf=0.0, neginf=0.0)
 
         nu = torch.nan_to_num(
-            sum_psi / torch.sqrt(sum_phi),
-            nan=-1.0, posinf=0.0, neginf=-1.0)
+            sum_psi / torch.sqrt(sum_phi), nan=-1.0, posinf=0.0, neginf=-1.0
+        )
         alpha = torch.nan_to_num(
-            sum_alpha / float(n_im),
-            nan=0.0, posinf=0.0, neginf=0.0)
+            sum_alpha / float(n_im), nan=0.0, posinf=0.0, neginf=0.0
+        )
 
         nu = torch.where(nu > min_snr, nu, torch.full_like(nu, -float("inf")))
         alpha = torch.where(torch.isfinite(nu), alpha, torch.zeros_like(alpha))
@@ -703,21 +789,20 @@ def run_shifts_topk(datas, inv_variances, rates, dmjds, min_snr, n_keep,
         while x0 < B:
             x1 = min(x0 + tile_w, B)
 
-            prev_snr = top_snr_cpu[:, :, x0:x1].to(device=device,
-                                                   dtype=work_dtype)
-            prev_alpha = top_alpha_cpu[:, :, x0:x1].to(device=device,
-                                                       dtype=work_dtype)
-            prev_rate = top_rate_idx_cpu[:, :, x0:x1].to(device=device,
-                                                         dtype=torch.int32)
+            prev_snr = top_snr_cpu[:, :, x0:x1].to(device=device, dtype=work_dtype)
+            prev_alpha = top_alpha_cpu[:, :, x0:x1].to(device=device, dtype=work_dtype)
+            prev_rate = top_rate_idx_cpu[:, :, x0:x1].to(
+                device=device, dtype=torch.int32
+            )
 
             cand_snr = nu[:, x0:x1].unsqueeze(0)
             cand_alpha = alpha[:, x0:x1].unsqueeze(0)
-            cand_rate = torch.full((1, A, x1 - x0), ir,
-                                   dtype=torch.int32, device=device)
+            cand_rate = torch.full(
+                (1, A, x1 - x0), ir, dtype=torch.int32, device=device
+            )
 
             all_snr = torch.cat([prev_snr, cand_snr], dim=0)
-            vals, idx = torch.topk(all_snr, k=k, dim=0, largest=True,
-                                   sorted=True)
+            vals, idx = torch.topk(all_snr, k=k, dim=0, largest=True, sorted=True)
 
             all_alpha = torch.cat([prev_alpha, cand_alpha], dim=0)
             new_alpha = torch.gather(all_alpha, 0, idx)
@@ -734,9 +819,7 @@ def run_shifts_topk(datas, inv_variances, rates, dmjds, min_snr, n_keep,
     return top_snr_cpu, top_alpha_cpu, top_rate_idx_cpu
 
 
-def topk_to_detections(top_snr, top_alpha, top_rate_idx,
-                       rates,
-                       dtype=np.float16):
+def topk_to_detections(top_snr, top_alpha, top_rate_idx, rates, dtype=np.float16):
     """Convert top-k cubes into detection table compatible with sns_utils."""
     if top_snr.shape[0] == 0:
         return np.zeros((0, 7), dtype=dtype)
