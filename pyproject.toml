@@ -6,12 +6,33 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "astropy>=7.2.0",
+    "jupyter>=1.1.1",
     "numpy>=2.4.2",
     "scipy>=1.17.0",
-    "torch>=2.10.0",
+    "torch>=2.11,<2.12",
 ]
 
-[dependencies-groups]
+[dependency-groups]
 dev = [
     "pytest>=8.3.3",
 ]
+
+# CUDA wheels (cu128) on Linux and Windows; CPU wheels from PyTorch's CPU index on
+# macOS and elsewhere. The second marker must use `and`, not `or`: otherwise it
+# is always true (every OS is either not-linux or not-win32).
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cu128", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+    { index = "pytorch-cpu", marker = "sys_platform != 'linux' and sys_platform != 'win32'" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
