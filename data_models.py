@@ -1,3 +1,4 @@
+import argparse
 from astropy.io import fits
 from astropy.table import Table, vstack
 from astropy.wcs import WCS
@@ -8,7 +9,6 @@ import logging
 import numpy as np
 import re
 from typing import List
-
 
 def read_flag_list_from_file(flags_fn) -> [str]:
     """Read the list of flags to mask
@@ -63,6 +63,13 @@ class ExtractedDataModel(object):
     MAX_PIX_VALUE = 8000
     MIN_PIX_VALUE = -10000
     VARIANCE_BITMASK = "SAT"
+
+    def args_parser(cls, parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
+        group = parser.add_subparsers(dest='filesystem')
+        group.add_argument('--chip',
+                        help="sub-directory of VISIT to process",
+                        default='00')
+        return parser
 
     def __init__(self, base_dir, collections, day_obs, chip, dataset_type,
                  bitmask_filename=None, data_dtype=np.float32):

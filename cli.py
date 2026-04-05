@@ -21,9 +21,6 @@ def main():
         'day_obs',
         help="The day-obs directory in {BASE_DIR}/{COLLECTIONS} to process",
         default='20240811')
-    parser.add_argument('chip',
-                        help="sub-directory of VISIT to process",
-                        default='00')
     parser.add_argument('--log-level', default='INFO',
                         type=str,
                         help="Configure the logging level.",
@@ -32,7 +29,7 @@ def main():
     parser.add_argument('--bitmask', type=str,
                         help=('The bitmask used with these data. '
                               '(ommit to read keys from mask extension.)'))
-    parser.add_argument('--flagkeys', default='flagkeys_nh.dat', type=str,
+    parser.add_argument('--flagkeys', default='data/flagkeys_nh.dat', type=str,
                         help='File with list of keys to mask.')
     parser.add_argument(
         '--clust-dist-lim',
@@ -105,24 +102,38 @@ def main():
     parser.add_argument('--rt', action='store_true',
                         default=False,
                         help='Run on the reverse time diff images instead.')
-    parser.add_argument('--collections',
-                        type=str,
-                        default='DIFFS',
-                        help="Sub-directory of BASER_DIR with warps to stack")
-    parser.add_argument('--dataset-type', type=str,
-                        default="diff_directWarp",
-                        help="dataset type of difference images to stack")
     parser.add_argument(
         '--base-dir',
         default='/arc/projects/NewHorizons/HSC_2024',
         help=textwrap.dedent(f"""
+            BASE_DIR is the file system path to the data storage directory or butler repository.
             Root path for inputs and outputs:
                 warps: BASE_DIR/COLLECTIONS/DAY_OBS/CHIP,
                 properties: BASE_DIR/COLLECTIONS/DAY_OBS/CHIP,
-                results: BASE_DIR/{APP_NAME}/DAY_OBS/CHIP/results.txt,'
+                results: BASE_DIR/{APP_NAME}/DAY_OBS/CHIP/results.txt,
                 inputs: BASE_DIR/{APP_NAME}/DAY_OBS/CHIP/params.json,
                 log: BASE_DIR/{APP_NAME}/DAY_OBS/CHIP/log.txt files to.
-            If --rt is used, {APP_NAME} will be replaced with rt{APP_NAME}"""))
+            If --rt is used, {APP_NAME} will be replaced with rt{APP_NAME}
+            If BASE_DIR is a butler repository, the data will be loaded from the butler.
+            If BASE_DIR is a file system path, the data will be loaded from the file system.
+            """))
+    parser.add_argument('--collections',
+                        type=str,
+                        default='DIFFS',
+                        help="name of collection/sub-dir with warps to stack")
+    parser.add_argument('--dataset-type', type=str,
+                        default="diff_directWarp",
+                        help="dataset type of difference images to stack")
+    sp = parser.add_subparsers()
+    sp.set_defaults(data_model='filesystem')
+    group1 = sp.add_parser('filesystem')
+    group1.add_argument('--chip', type=str, help='Chip')
+    group2 = sp.add_parser('butler')
+    group2.add_argument('--tract', type=int, help='Tract')
+    group2.add_argument('--patch', type=int, help='Patch')
+    group2.add_argument('--band', type=str, help='Band', default='gri')
+    group2.add_argument('--instrument', type=str, help='Instrument', default='HSC')
+    
     args = parser.parse_args()
 
     rt = '' if not args.rt else 'rt'
