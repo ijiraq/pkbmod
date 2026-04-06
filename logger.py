@@ -3,7 +3,7 @@ import sys
 
 
 def config_logging(level: str, filename, no_tty=False):
-    level = getattr(logging, level)
+    # level = getattr(logging, level)
     # Create a StreamHandler and set its level and format
     stream_handler = logging.StreamHandler(sys.stdout)
     stream_handler.setLevel(level)  # Set the desired level for the console
@@ -20,6 +20,12 @@ def config_logging(level: str, filename, no_tty=False):
     if not no_tty:
         handlers.append(stream_handler)
 
+    print(handlers)
+    logger = logging.getLogger(__name__)
     logging.basicConfig(
         level=level,
         handlers=handlers)
+    effLevel = logging.getLogger().getEffectiveLevel()
+    logging.error(f"Logger set to: {effLevel}")
+    print(f"Logger set to: {effLevel}")
+    return logger

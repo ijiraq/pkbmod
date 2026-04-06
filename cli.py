@@ -1,11 +1,9 @@
 from argparse import ArgumentParser, ArgumentDefaultsHelpFormatter
 import logging
-import logger
 import numpy as np
 import os
+import sys
 import textwrap
-
-from data_models import ExtractedDataModel
 from data_models import StackParams
 from data_models import read_flag_list_from_file
 import stack
@@ -13,24 +11,36 @@ import stack
 APP_NAME = 'pkbmod'
 EXTENSION_WITH_WCS = 1
 
+def get_logging_handlers_and_level(level: str, filename, no_tty=False):
+    level = getattr(logging, level)
+    # Create a StreamHandler and set its level and format
+    stream_handler = logging.StreamHandler(sys.stdout)
+    stream_handler.setLevel(level)  # Set the desired level for the console
+    stream_formatter = logging.Formatter('%(asctime)s %(filename)s:%(lineno)d %(module)s.%(funcName)s: %(levelname)-8s %(message)s')
+    stream_handler.setFormatter(stream_formatter)
+
+    # Create a FileHandler and set its level and format
+    file_handler = logging.FileHandler(filename, mode='a')
+    file_handler.setLevel(level)  # Set the desired level for the file
+    file_formatter = logging.Formatter('%(asctime)s %(filename)s:%(lineno)d %(module)-12s: %(levelname)-8s %(message)s')
+    file_handler.setFormatter(file_formatter)
+
+    handlers = [file_handler]
+    if not no_tty:
+        handlers.append(stream_handler)
+    return handlers
+
 
 def main():
     parser = ArgumentParser(
         formatter_class=ArgumentDefaultsHelpFormatter)
-    parser.add_argument(
-        'day_obs',
-        help="The day-obs directory in {BASE_DIR}/{COLLECTIONS} to process",
-        default='20240811')
     parser.add_argument('--log-level', default='INFO',
                         type=str,
                         help="Configure the logging level.",
                         choices=logging.getLevelNamesMapping().keys())
     parser.add_argument('--no-tty', default=False, action='store_true')
-    parser.add_argument('--bitmask', type=str,
-                        help=('The bitmask used with these data. '
-                              '(ommit to read keys from mask extension.)'))
     parser.add_argument('--flagkeys', default='data/flagkeys_nh.dat', type=str,
-                        help='File with list of keys to mask.')
+                        help='File with list or , seperated list of keys to mask.')
     parser.add_argument(
         '--clust-dist-lim',
         default=4.0,
@@ -99,72 +109,135 @@ def main():
         choices=[16, 32],
         default=32,
         help="Floating-point precision for CLI workflow arrays/tensors.")
-    parser.add_argument('--rt', action='store_true',
+
+
+    sp = parser.add_subparsers(dest='mode')
+
+    fsargs = sp.add_parser('filesystem', help="Find inputs in pre-defined filesystem paths",
+                           formatter_class=ArgumentDefaultsHelpFormatter,
+                           )
+            # If --rt is used, {APP_NAME} will be replaced with rt{APP_NAME}
+    fsargs.add_argument('day_obs', type=int, help='day_obs', default=20240811)
+    fsargs.add_argument('chip', type=int, help='Chip')
+    fsargs.add_argument('--collections',
+                        type=str,
+                        help="name of collection/sub-dir with warps to stack")
+    fsargs.add_argument('--dataset-type', type=str,
+                        help="dataset type of difference images to stack")
+    fsargs.add_argument('--rt', action='store_true',
                         default=False,
                         help='Run on the reverse time diff images instead.')
-    parser.add_argument(
-        '--base-dir',
-        default='/arc/projects/NewHorizons/HSC_2024',
-        help=textwrap.dedent(f"""
-            BASE_DIR is the file system path to the data storage directory or butler repository.
-            Root path for inputs and outputs:
-                warps: BASE_DIR/COLLECTIONS/DAY_OBS/CHIP,
-                properties: BASE_DIR/COLLECTIONS/DAY_OBS/CHIP,
-                results: BASE_DIR/{APP_NAME}/DAY_OBS/CHIP/results.txt,
-                inputs: BASE_DIR/{APP_NAME}/DAY_OBS/CHIP/params.json,
-                log: BASE_DIR/{APP_NAME}/DAY_OBS/CHIP/log.txt files to.
-            If --rt is used, {APP_NAME} will be replaced with rt{APP_NAME}
-            If BASE_DIR is a butler repository, the data will be loaded from the butler.
-            If BASE_DIR is a file system path, the data will be loaded from the file system.
-            """))
-    parser.add_argument('--collections',
+    fsargs.add_argument('--base-dir',
+                        default="/arc/projects/NewHorizons/HSC_2024/",
+                        help=textwrap.dedent(f"""\
+            BASE_DIR is the file system path to the data storage directory.
+            Path for inputs and outputs are logically given by .......\n
+            warps: BASE_DIR/COLLECTIONS/DAY_OBS/CHIP ........... \n
+            properties: BASE_DIR/COLLECTIONS/DAY_OBS/CHIP ........... \n
+            results: BASE_DIR/{APP_NAME}/DAY_OBS/CHIP/results.txt ........... \n
+            inputs: BASE_DIR/{APP_NAME}/DAY_OBS/CHIP/params.json ........... \n
+            log: BASE_DIR/{APP_NAME}/DAY_OBS/CHIP/log.txt files to ........
+            """),
+                        metavar='BASE_DIR')
+    fsargs.set_defaults(collections="DIFFS",
+                        dataset_type="diff_directWarp")
+    fsargs.add_argument('--bitmask-filename', type=str,
+                        help=('The bitmask used with these data. '
+                              '(ommit to read keys from mask extension.)'))
+
+    btargs = sp.add_parser('butler', help="Find inputs using the LSST Butler",
+                           formatter_class=ArgumentDefaultsHelpFormatter,
+                           description=textwrap.dedent(f"""
+                           Use the LSST Butler to find data to stack, also assumes
+                           the bitmask flag name to value map is in the header of image"""),
+                           )
+    btargs.add_argument("butler",
+                        help="LSST Butler path",
+                        default="/arc/projects/NewHorizons/HSC_2024/PG2_BUTLER")
+    btargs.add_argument('day_obs', type=int, help='day_obs')
+    btargs.add_argument('skymap', type=str, help='skymap name')
+    btargs.add_argument('tract', type=int, help='Tract')
+    btargs.add_argument('patch', type=int, help='Patch')
+    btargs.add_argument('--collections',
                         type=str,
-                        default='DIFFS',
                         help="name of collection/sub-dir with warps to stack")
-    parser.add_argument('--dataset-type', type=str,
-                        default="diff_directWarp",
+    btargs.add_argument('--dataset-type', type=str,
                         help="dataset type of difference images to stack")
-    sp = parser.add_subparsers()
-    sp.set_defaults(data_model='filesystem')
-    group1 = sp.add_parser('filesystem')
-    group1.add_argument('--chip', type=str, help='Chip')
-    group2 = sp.add_parser('butler')
-    group2.add_argument('--tract', type=int, help='Tract')
-    group2.add_argument('--patch', type=int, help='Patch')
-    group2.add_argument('--band', type=str, help='Band', default='gri')
-    group2.add_argument('--instrument', type=str, help='Instrument', default='HSC')
+    btargs.set_defaults(collections="u/NH/coadd", 
+                        dataset_type="injected_diff_directWarp")
+    btargs.add_argument('--band', type=str, help='Band', default='gri')
+    btargs.add_argument('--instrument', type=str, help='Instrument', default='HSC')
+    btargs.add_argument('--psf-dataset-type', type=str, help='What dataset to get PSF from',
+                        default='injected_calexp')
     
     args = parser.parse_args()
 
-    rt = '' if not args.rt else 'rt'
-    base_dir = args.base_dir
-    collections = args.collections
-    dataset_type = args.dataset_type
-    day_obs = args.day_obs
-    chip = args.chip
-    bitmask_filename = args.bitmask
-    flaglist_filename = args.flagkeys
+    # what level of floating point to use (float16 to lower memory footprint)
     run_dtype = np.float16 if args.float_precision == 16 else np.float32
 
-    path = "/".join([base_dir,
-                     f"{rt}{APP_NAME}",
-                     day_obs,
-                     f"results_{chip}"])
-    os.makedirs(path, exist_ok=True)
-    logfilname = f'{path}/log.txt'
-    _ = logger.config_logging(args.log_level,
-                              logfilname,
-                              args.no_tty)
-    params_filename = f"{path}/params.json"
-    results_filename = f"{path}/results_.txt"
-    plants_match_filename = f"{path}/plant_matches.txt"
+    # get the flag names for pixels to mask from a file or string on command line
+    if os.access(args.flagkeys, os.R_OK):
+        badflags = read_flag_list_from_file(args.flagkeys)
+    else:
+        badflags = args.flagskeys.split(",")
 
-    logging.info(f"Saving log to {logfilname}")
+
+    # add mode specific args and set the model
+    if args.mode == 'filesystem':
+       from data_models import ExtractedDataModel as DataModel
+       data_model_args = {'day_obs': args.day_obs,
+                          'collections': args.collections,
+                          'dataset_type': args.dataset_type,
+                          'bitmask_filename': args.bitmask_filename,
+                          'data_dtype': run_dtype,
+                          'chip': args.chip,
+                          'base_dir':  args.base_dir,
+                          }
+       output_path = "/".join([f"{data_model_args['base_dir']}",
+                     f"{APP_NAME}",
+                     f"{data_model_args['day_obs']}",
+                     f"results_{data_model_args['chip']}"])
+       os.makedirs(output_path, exist_ok=True)
+
+    if args.mode == 'butler':
+        from butler_data_model import ButlerDataModel as DataModel
+        data_model_args = {'day_obs': args.day_obs,
+                           'collections': args.collections,
+                           'dataset_type': args.dataset_type,
+                           'butler': args.butler,
+                           'skymap': args.skymap,
+                           'tract': args.tract,
+                           'patch': args.patch,
+                           'band': args.band,
+                           'instrument':  args.instrument,
+                           'psf_dataset_type': args.psf_dataset_type,
+                           }
+        output_path = "/".join([f"{data_model_args['butler']}",
+                                f"{data_model_args['collections']}",
+                                f"{APP_NAME}",
+                                f"{data_model_args['day_obs']}",
+                                f"{data_model_args['tract']}",
+                                f"{data_model_args['patch']}"])
+        os.makedirs(output_path, exist_ok=True)
+
+
+    logfilname = f'{output_path}/log.txt'
+    logger = logging.getLogger(__name__)
+    handlers, level = get_logging_handlers_and_level(args.log_level,
+                                                     logfilname,
+                                                     args.no_tty)
+
+ .  logger.addHandlers(handlers)
+    logger.setLevel(level)
+    logging.error(f"Logger set to: {logging.getLogger().getEffectiveLevel()}")
+    logging.debug("Args: {args}")
+    params_filename = f"{output_path}/params.json"
+    results_filename = f"{output_path}/results_.txt"
+    plants_match_filename = f"{output_path}/plant_matches.txt"
     logging.info(f"Saving parameters to {params_filename}")
     logging.info(f"Saving results to {results_filename}")
     logging.info(f"Saving matched plants to {plants_match_filename}")
 
-    badflags = read_flag_list_from_file(flaglist_filename)
 
     # Stacking Parameters
     stack_params = StackParams(params_filename)
@@ -182,11 +255,12 @@ def main():
     stack_params.badflags = badflags
     stack_params.save()
 
-    data_model = ExtractedDataModel(base_dir, collections,
-                                    day_obs, chip, dataset_type,
-                                    bitmask_filename=bitmask_filename,
-                                    data_dtype=run_dtype)
+    # common arguments used by DataModel class builders
 
+
+    logging.info(f"Saving log to {logfilname}")
+
+    data_model = DataModel(**data_model_args)
     data_model.mask_variance(stack_params.variance_trim)
     data_model.pack_inputs()
 

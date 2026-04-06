@@ -12,29 +12,14 @@ import argparse
 from astropy.table import Table, vstack
 from astropy.time import Time
 from astropy.table import join
-import logging
-from lsst.afw.image import installGaussianPsf
 from lsst.afw.image import ImageOrigin
+from lsst.daf.base import DateTime  # noqa: F401  # type: ignore[import-untyped]
 from lsst.daf.butler import Butler
 from lsst.geom import Point2D, SpherePoint
+from lsst.meas.algorithms import installGaussianPsf
+import logging
 import numpy as np  
 from typing import Any, Mapping, Sequence
-
-_LOG = logging.getLogger(__name__)
-_LOG_LEVEL = _LOG.getEffectiveLevel()
-
-def _ensure_lsst():
-    """Import LSST stack pieces; raise a clear error if missing."""
-    try:
-        import lsst.afw.image  # noqa: F401  # type: ignore[import-untyped]
-        from lsst.daf.base import DateTime  # noqa: F401  # type: ignore[import-untyped]
-    except ImportError as e:
-        raise ImportError(
-            "Butler-based loading needs the LSST Science Pipelines (lsst.afw, "
-            "lsst.geom, etc.). Select the Jupyter kernel where the stack is "
-            "installed, or install the pipelines in this environment."
-        ) from e
-    return DateTime
 
 
 def _mask_plane_bitmask(mask) -> dict[str, int]:
@@ -105,29 +90,23 @@ class ButlerDataModel:
         self,
         butler: str,
         collections: str | Sequence[str],
+        day_obs: int,
+        skymap: str,
         tract: int,
         patch: int,
         band: str = 'gri',
         dataset_type: str = "injected_diff_directWarp",
         instrument: str = 'HSC',
-        bitmask_filename: str | None = None,
-        plants: Table | None = None,
         data_dtype: np.dtype = np.float32,
         psf_dataset_type: str = "injected_calexp",
+        injected_catalog_dataset_type: str = "injected_calexp_catalog",
     ) -> None:
         """
         Args:
             butler: An open ``lsst.daf.butler.Butler`` instance.
             collections: Collection name(s) passed to the registry query.
             dataset_type: Butler dataset type string (e.g. injected diff warps).
-            where: Optional ``registry.queryDatasets`` WHERE string. If omitted,
-                you must pass ``bind`` with all bound keys used in ``where``,
-                or set ``bind`` for the default query (see below).
-            bind: Bindings for ``where``. If ``where`` is None, a default is used:
-                ``instrument``, ``tract``, ``patch``, ``band`` must be present in
-                ``bind`` (unless you supply a full custom ``where``).
-            bitmask_filename: Optional path to bitmask definition (same as
-                :class:`ExtractedDataModel`).
+            where: Optional ``registry.queryDatasets`` WHERE string. 
             plants: Injection/plant table; if None, :func:`minimal_plants_table` is used.
             data_dtype: Array dtype for science data and PSFs.
             psf_dataset_type: Calexp dataset used for PSF. The detector is chosen by
@@ -138,17 +117,18 @@ class ButlerDataModel:
         self.butler = Butler(butler, collections=collections)
         self.collections = collections
         self.dataset_type = dataset_type
+        self.skymap = skymap
         self.tract = tract
         self.patch = patch
         self.band = band
         self.day_obs = day_obs
         self.instrument = instrument
-        self.bitmask_filename = bitmask_filename
-        self._plants = plants
         self.data_dtype = np.dtype(data_dtype)
         self.psf_dataset_type = psf_dataset_type
+        self.injected_catalog_dataset_type = injected_catalog_dataset_type
         self._stack_inputs: dict | None = None
         self._bitmask: dict | None = None
+        self._plants: Table | None = None
 
     @property
     def plants(self) -> Table:
@@ -169,24 +149,25 @@ class ButlerDataModel:
         return self._refs
 
     def _query_refs(self):
-        where = (f"instrument = '{self.instrument}' "
-                 f"AND day_obs = '{self.day_obs}' "
+        where = (f"instrument='{self.instrument}' "
+                 f"AND day_obs={self.day_obs} "
+                 f"AND skymap='{self.skymap}' "
                  f"AND tract={self.tract} "
                  f"AND patch={self.patch} "
-                 f"AND band ='{self.band}'")
-        limit = _LOG_LEVEL <= logging.DEBUG and 10 or None
+                 f"AND band='{self.band}'")
+        limit = logging.getLogger().getEffectiveLevel() <= logging.DEBUG and 10 or None
+        logging.debug(f"Getting {self.dataset_type} datasets using\n where:{where}\n limit:{limit}")
         refs = sorted(
             self.butler.query_datasets(
                 self.dataset_type,
                 collections=self.collections,
                 where=where,
-                bind=bind,
                 limit=limit,
             ),
             key=lambda r: r.dataId["visit"],
         )
         if not refs:
-            raise ValueError(f"No datasets of type {self.dataset_type} for collections={self.collections} where={where} bind={bind}")
+            raise ValueError(f"No datasets of type {self.dataset_type} for collections={self.collections} where={where}")
         return refs
 
     def _get_psf_at_sky(self, dataId: dict, instrument: str, point: SpherePoint):
@@ -202,7 +183,7 @@ class ButlerDataModel:
         p = wcs.skyToPixel(point)
         psf = injected_calexp.getPsf()
         fwhm = psf.computeShape(p).getDeterminantRadius()*installGaussianPsf.FwhmPerSigma
-        kernel = psf.computeKernelImage(p)
+        kernel = psf.computeKernelImage(p).array
         return kernel, fwhm
 
     def _get_injected_source_catalog(self):
@@ -213,24 +194,25 @@ class ButlerDataModel:
         The catalog is stored for each detector in the difference image, and we combine them into a single table.
 
         There is an error in the source injection code that causes the rate_ra and rate_dec columns to be incorrect
-        so we ignore them and compute the rates from the differences x0 and y0 between the first and last visit.
-        """
-        init_diff_ref = self.refs[0]
-        final_diff_ref = self.refs[-1]
-        diff = self.butler.get(init_diff_ref)
-        wcs = diff.getWcs()
-        x0, y0 = diff.getXY0()
-        injected_source_catalog_refs = {}
-        injected_source_catalog_refs['initial'] = self.butler.query_datasets('injected_calexp_catalog', 
-                                                            data_id=init_diff_ref.dataId)
-        injected_source_catalog_refs['final'] = self.butler.query_datasets('injected_calexp_catalog', 
-                                                            data_id=final_diff_ref.dataId)
+        so we ignore them and compute the rates from the differences x1 and y0 between the first and last visit.
 
+        """
+        data_id = {'initial': self.refs[0].dataId,
+                   'final': self.refs[-1].dataId}
+        # in lsst science pipeline the WCS can have a different x0/y0 compared to the numpy array 
+        # the WCS returns x, y set in the x0/y0 reference and we must remove those to be in the 
+        # np.array from of the image.
+        diff = self.butler.get(self.refs[0])
+        x0, y0 = diff.getXY0()
+        wcs = diff.getWcs()
         injected_source_catalogs = {}
-        for epoch in injected_source_catalog_refs:
+        for epoch in data_id:
             injected_source_catalogs[epoch] = []
-            for ref in injected_source_catalog_refs[epoch]:
+            dataset_refs = self.butler.query_datasets(self.injected_catalog_dataset_type,
+                                                      data_id=data_id[epoch])
+            for ref in dataset_refs:
                 cat = self.butler.get(ref)
+                # convert ra/dec of input into x/y locations using the diff WCS
                 x, y = wcs.skyToPixelArray(cat['ra'], cat['dec'], degrees=True)
                 cat['X0'] = x - x0
                 cat['Y0'] = y - y0 
@@ -239,10 +221,13 @@ class ButlerDataModel:
         t1 = Time(injected_source_catalogs['initial'].meta['day_obs'])
         t2 = Time(injected_source_catalogs['final'].meta['day_obs'])
         dt = (t2-t1).to('hour').value
-        cat = join(injected_source_catalogs['initial'], injected_source_catalogs['final'], keys=['injection_id'])
+        cat = join(injected_source_catalogs['initial'], 
+                   injected_source_catalogs['final'], 
+                   keys=['injection_id'])
         cat['rate_x'] = (cat['X0_2']-cat['X0_1'])/dt
         cat['rate_y'] = (cat['Y0_2']-cat['Y0_1'])/dt
         cat = cat['injection_id', 'X0_1','Y0_1','rate_x', 'rate_y', 'mag_1']
+        logging.debug(f"Full injected source catalog:\n{cat}")
         cat['injection_id'].name = 'id'
         cat['X0_1'].name = 'x0'
         cat['Y0_1'].name = 'y0'
@@ -251,7 +236,6 @@ class ButlerDataModel:
 
     def _load_from_butler(self) -> dict[str, Any]:
         """Load the data from the butler and return a dictionary of arrays for stacking."""
-        DateTime = _ensure_lsst()
         refs = self.refs
         datas: list[np.ndarray] = []
         masks: list[np.ndarray] = []
@@ -268,12 +252,12 @@ class ButlerDataModel:
             # get bitmask from exposure mask plane of first exposure
             if self._bitmask is None:
                 self._bitmask = _mask_plane_bitmask(exposure.maskedImage.mask)
-                _LOG.debug("Bitmask from exposure mask planes: %s", self._bitmask)
+                logging.debug("Bitmask from exposure mask planes: %s", self._bitmask)
 
             point = _good_point_near_image_center(exposure)
             visit = int(ref.dataId["visit"])
             instrument = ref.dataId["instrument"]
-            _LOG.debug(
+            logging.debug(
                 f"Warp sky location for PSF lookup: {point}"
             )
             psf_arr, fwhm = self._get_psf_at_sky(ref.dataId, instrument, point)
@@ -321,7 +305,7 @@ class ButlerDataModel:
         im_nums = self._stack_inputs["im_nums"]
         bm = self.bitmask
         if self.VARIANCE_BITMASK not in bm:
-            _LOG.warning(
+            logging.warning(
                 "No mask plane %r in bitmask %s; skipping variance trim mask bit",
                 self.VARIANCE_BITMASK,
                 list(bm.keys()),
@@ -351,9 +335,9 @@ class ButlerDataModel:
             variances[idx][w] = np.nan
             datas[idx][w] = 0.0
             nan_med_variance = np.nanmedian(variances[idx])
-            _LOG.debug("%s %s %s", im_nums[idx], dmjds[idx], nan_med_variance)
+            logging.debug("%s %s %s", im_nums[idx], dmjds[idx], nan_med_variance)
             if np.isnan(nan_med_variance):
-                _LOG.debug("Skipping image %s due to nans.", im_nums[idx])
+                logging.debug("Skipping image %s due to nans.", im_nums[idx])
                 for key in per_visit_keys:
                     self._stack_inputs[key].pop(idx)
             else:

@@ -431,6 +431,7 @@ def run(stack_inputs: dict, stack_params: dict,
         w = np.where(grid_detections[:, 5] >= trim_snr)
         final_stamps = grid_stamps[w]
         final_detections = grid_detections[w]
+        del grid_detections, grid_stamps
     else:
         w = np.where(clust_detections[:, 5] >= trim_snr)
         final_detections = clust_detections[w]
@@ -438,10 +439,10 @@ def run(stack_inputs: dict, stack_params: dict,
     n_det = len(final_detections)
     # clust_stamps = clust_stamps[w]
     logging.info(f'Number of candidates {n_det}')
-    del grid_detections, grid_stamps
-    del im_datas, inv_vars, c, cv, kernel
-    gc.collect()
-    torch.cuda.empty_cache()
+    # remove these memory cleanups as they aren't needed at this point
+    # del im_datas, inv_vars, c, cv, kernel
+    # gc.collect()
+    # torch.cuda.empty_cache()
 
     # columns to add to the plant table to track matched detections
     detection_types = {'det_shift': detections,
