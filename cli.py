@@ -11,24 +11,41 @@ import stack
 APP_NAME = 'pkbmod'
 EXTENSION_WITH_WCS = 1
 
-def get_logging_handlers_and_level(level: str, filename, no_tty=False):
-    level = getattr(logging, level)
-    # Create a StreamHandler and set its level and format
-    stream_handler = logging.StreamHandler(sys.stdout)
-    stream_handler.setLevel(level)  # Set the desired level for the console
-    stream_formatter = logging.Formatter('%(asctime)s %(filename)s:%(lineno)d %(module)s.%(funcName)s: %(levelname)-8s %(message)s')
-    stream_handler.setFormatter(stream_formatter)
+logger = logging.getLogger(__name__)
 
-    # Create a FileHandler and set its level and format
-    file_handler = logging.FileHandler(filename, mode='a')
-    file_handler.setLevel(level)  # Set the desired level for the file
-    file_formatter = logging.Formatter('%(asctime)s %(filename)s:%(lineno)d %(module)-12s: %(levelname)-8s %(message)s')
-    file_handler.setFormatter(file_formatter)
 
-    handlers = [file_handler]
+def configure_cli_logging(level_name: str, filename: str, *, no_tty: bool = False) -> None:
+    """Configure the *root* logger so library ``logging.getLogger(__name__)`` records propagate.
+
+    - **File**: receives every record at or above ``--log-level`` (the usual behavior).
+    - **stderr**: receives INFO and above, or only stricter levels if ``--log-level`` is
+      above INFO (e.g. WARNING → stderr shows WARNING+ only). Disabled with ``--no-tty``.
+    """
+    file_level = getattr(logging, level_name.upper(), logging.INFO)
+    # At least INFO on the console unless user chose something stricter
+    stream_level = max(logging.INFO, file_level)
+
+    file_formatter = logging.Formatter(
+        "%(asctime)s %(filename)s:%(lineno)d %(module)-12s: %(levelname)-8s %(message)s"
+    )
+    stream_formatter = logging.Formatter(
+        "%(asctime)s %(filename)s:%(lineno)d %(module)s.%(funcName)s: %(levelname)-8s %(message)s"
+    )
+
+    root = logging.getLogger()
+    root.handlers.clear()
+    root.setLevel(logging.DEBUG)
+
+    fh = logging.FileHandler(filename, mode="a", encoding="utf-8")
+    fh.setLevel(file_level)
+    fh.setFormatter(file_formatter)
+    root.addHandler(fh)
+
     if not no_tty:
-        handlers.append(stream_handler)
-    return handlers
+        sh = logging.StreamHandler(sys.stderr)
+        sh.setLevel(stream_level)
+        sh.setFormatter(stream_formatter)
+        root.addHandler(sh)
 
 
 def main():
@@ -179,7 +196,7 @@ def main():
     if os.access(args.flagkeys, os.R_OK):
         badflags = read_flag_list_from_file(args.flagkeys)
     else:
-        badflags = args.flagskeys.split(",")
+        badflags = args.flagkeys.split(",")
 
 
     # add mode specific args and set the model
@@ -221,22 +238,15 @@ def main():
         os.makedirs(output_path, exist_ok=True)
 
 
-    logfilname = f'{output_path}/log.txt'
-    logger = logging.getLogger(__name__)
-    handlers, level = get_logging_handlers_and_level(args.log_level,
-                                                     logfilname,
-                                                     args.no_tty)
-
- .  logger.addHandlers(handlers)
-    logger.setLevel(level)
-    logging.error(f"Logger set to: {logging.getLogger().getEffectiveLevel()}")
-    logging.debug("Args: {args}")
+    logfilname = f"{output_path}/log.txt"
+    configure_cli_logging(args.log_level, logfilname, no_tty=args.no_tty)
+    logger.debug("Args: %r", args)
     params_filename = f"{output_path}/params.json"
     results_filename = f"{output_path}/results_.txt"
     plants_match_filename = f"{output_path}/plant_matches.txt"
-    logging.info(f"Saving parameters to {params_filename}")
-    logging.info(f"Saving results to {results_filename}")
-    logging.info(f"Saving matched plants to {plants_match_filename}")
+    logger.info("Saving parameters to %s", params_filename)
+    logger.info("Saving results to %s", results_filename)
+    logger.info("Saving matched plants to %s", plants_match_filename)
 
 
     # Stacking Parameters
@@ -258,7 +268,7 @@ def main():
     # common arguments used by DataModel class builders
 
 
-    logging.info(f"Saving log to {logfilname}")
+    logger.info("Saving log to %s", logfilname)
 
     data_model = DataModel(**data_model_args)
     data_model.mask_variance(stack_params.variance_trim)

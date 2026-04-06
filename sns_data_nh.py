@@ -4,6 +4,8 @@ import numpy as np
 import scipy as sci
 import torch
 
+logger = logging.getLogger(__name__)
+
 NOMINAL_PIXEL_SCALE = 0.17  # arcsec/pixel
 MAX_SHIFT_RATE = 4.5  # arcsec/hour
 MAX_RATE_PIX_PER_DAY = 24*MAX_SHIFT_RATE/NOMINAL_PIXEL_SCALE
@@ -17,7 +19,7 @@ def get_device() -> torch.device:
     """
     gpu_available = torch.cuda.is_available()
     message = "Using GPU" if gpu_available else "No GPU. Using CPU"
-    logging.info(message)
+    logger.info(message)
     return torch.device("cuda:0" if gpu_available else "cpu")
 
 
@@ -36,7 +38,7 @@ def get_shift_rates(plants: Table,
         plants['rate_y'] *= -1.
         swap_signs = True
 
-    logging.debug(f'Number of planted sources: {len(plants)}')
+    logger.debug(f'Number of planted sources: {len(plants)}')
     w = (plants['rate_x']**2 + plants['rate_y']**2) < MAX_RATE_PIX_PER_DAY**2
     angs = np.arctan2(plants['rate_y'][w],
                       plants['rate_x'][w]) % (2*np.pi)
@@ -53,7 +55,7 @@ def get_shift_rates(plants: Table,
     d_ang = max(max_ang-med_ang, med_ang-min_ang)
     max_ang = med_ang + d_ang
     min_ang = med_ang - d_ang
-    logging.debug((f"Angles (min:{min_ang}, max: {max_ang}, "
+    logger.debug((f"Angles (min:{min_ang}, max: {max_ang}, "
                    f"med: {med_ang}, delta: {d_ang})"))
 
     W = np.abs(plants['rate_x']) < 200
@@ -63,10 +65,10 @@ def get_shift_rates(plants: Table,
     max_x = np.max(plants['rate_x'] + 5)
     max_y = max_x*line.slope + line.intercept
 
-    logging.debug(f"Max x/y: {max_x}, {max_y}")
+    logger.debug(f"Max x/y: {max_x}, {max_y}")
 
     seeing = np.mean(fwhms)*NOMINAL_PIXEL_SCALE  # 0.7
-    logging.debug(f'Mean FWHM {seeing}" ')
+    logger.debug(f'Mean FWHM {seeing}" ')
     seeing /= NOMINAL_PIXEL_SCALE  # pixels
 
     # dh = (mjds[-1]-mjds[0]) # days
@@ -104,7 +106,7 @@ def get_shift_rates(plants: Table,
         current_rate += drate
     # the first rate is duplicated in the above algorithm
     rates = np.array(rates)[1:]
-    logging.debug(f"Number of rates: {len(rates)}")
+    logger.debug(f"Number of rates: {len(rates)}")
 
     if swap_signs:
         rates *= -1.
@@ -123,13 +125,13 @@ def create_kernel(psfs, dmjds,
                   dtype=np.float32):
     
     if psfs is None and not useGaussianKernel:
-        logging.error("Set useGaussianKernal when no psfs provided")
+        logger.error("Set useGaussianKernal when no psfs provided")
         raise ValueError("Set useGaussianKernal when no psfs provided")
     mean_rate = np.mean(rates, axis=0, dtype=dtype)
-    logging.debug(f"Creating kernel for rates: {mean_rate}")
+    logger.debug(f"Creating kernel for rates: {mean_rate}")
     device = get_device()
     if useGaussianKernel:
-        logging.debug("Using a Gaussian Kernel")
+        logger.debug("Using a Gaussian Kernel")
         # kernel_width = 10
         std = 1.5
         khw = kernel_width//2
@@ -147,7 +149,7 @@ def create_kernel(psfs, dmjds,
             kernel[0, 0, ir, :, :] = torch.tensor(np.copy(gauss))
 
     else:
-        logging.debug('Using PSF kernel')
+        logger.debug('Using PSF kernel')
         # kernel_width = 1000
         # for i in range(len(psfs)):
         #    kernel_width = min(kernel_width, psfs[i].shape[0])
@@ -182,7 +184,7 @@ def create_kernel(psfs, dmjds,
         for id in range(0, len(psfs)):
             shifts = (int(-np.round(DMJDS[id]*mean_rate[1])),
                       int(-np.round(DMJDS[id]*mean_rate[0])))
-            logging.debug(f"shifts for negative wells: {shifts}")
+            logger.debug(f"shifts for negative wells: {shifts}")
             if (abs(shifts[0]) < khw) & (abs(shifts[1]) < khw):
                 c[0, 0, id,] = torch.roll(mean_kernel,
                                           shifts=shifts,

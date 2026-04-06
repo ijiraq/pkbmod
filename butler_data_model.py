@@ -18,8 +18,10 @@ from lsst.daf.butler import Butler
 from lsst.geom import Point2D, SpherePoint
 from lsst.meas.algorithms import installGaussianPsf
 import logging
-import numpy as np  
+import numpy as np
 from typing import Any, Mapping, Sequence
+
+logger = logging.getLogger(__name__)
 
 
 def _mask_plane_bitmask(mask) -> dict[str, int]:
@@ -155,8 +157,13 @@ class ButlerDataModel:
                  f"AND tract={self.tract} "
                  f"AND patch={self.patch} "
                  f"AND band='{self.band}'")
-        limit = logging.getLogger().getEffectiveLevel() <= logging.DEBUG and 10 or None
-        logging.debug(f"Getting {self.dataset_type} datasets using\n where:{where}\n limit:{limit}")
+        limit = 10 if logger.isEnabledFor(logging.DEBUG) else None
+        logger.debug(
+            "Getting %s datasets using\n where:%s\n limit:%s",
+            self.dataset_type,
+            where,
+            limit,
+        )
         refs = sorted(
             self.butler.query_datasets(
                 self.dataset_type,
@@ -227,7 +234,7 @@ class ButlerDataModel:
         cat['rate_x'] = (cat['X0_2']-cat['X0_1'])/dt
         cat['rate_y'] = (cat['Y0_2']-cat['Y0_1'])/dt
         cat = cat['injection_id', 'X0_1','Y0_1','rate_x', 'rate_y', 'mag_1']
-        logging.debug(f"Full injected source catalog:\n{cat}")
+        logger.debug(f"Full injected source catalog:\n{cat}")
         cat['injection_id'].name = 'id'
         cat['X0_1'].name = 'x0'
         cat['Y0_1'].name = 'y0'
@@ -252,12 +259,12 @@ class ButlerDataModel:
             # get bitmask from exposure mask plane of first exposure
             if self._bitmask is None:
                 self._bitmask = _mask_plane_bitmask(exposure.maskedImage.mask)
-                logging.debug("Bitmask from exposure mask planes: %s", self._bitmask)
+                logger.debug("Bitmask from exposure mask planes: %s", self._bitmask)
 
             point = _good_point_near_image_center(exposure)
             visit = int(ref.dataId["visit"])
             instrument = ref.dataId["instrument"]
-            logging.debug(
+            logger.debug(
                 f"Warp sky location for PSF lookup: {point}"
             )
             psf_arr, fwhm = self._get_psf_at_sky(ref.dataId, instrument, point)
@@ -335,9 +342,9 @@ class ButlerDataModel:
             variances[idx][w] = np.nan
             datas[idx][w] = 0.0
             nan_med_variance = np.nanmedian(variances[idx])
-            logging.debug("%s %s %s", im_nums[idx], dmjds[idx], nan_med_variance)
+            logger.debug("%s %s %s", im_nums[idx], dmjds[idx], nan_med_variance)
             if np.isnan(nan_med_variance):
-                logging.debug("Skipping image %s due to nans.", im_nums[idx])
+                logger.debug("Skipping image %s due to nans.", im_nums[idx])
                 for key in per_visit_keys:
                     self._stack_inputs[key].pop(idx)
             else:

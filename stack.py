@@ -9,6 +9,8 @@ import torch
 import sns_data_nh as data
 import sns_utils as utils
 
+logger = logging.getLogger(__name__)
+
 EXTENSION_WITH_WCS = 1
 VARIANCE_MASK = 'VARIANCE'
 
@@ -204,7 +206,7 @@ def run(stack_inputs: dict, stack_params: dict,
         dmjds=dmjds,
         rate_fwhm_grid_step=rate_fwhm_grid_step)
 
-    logging.debug(("Creating the convolution kernel:"
+    logger.debug(("Creating the convolution kernel:"
                    f" Use Guassian:{use_gaussian_kernel}"))
     kernel = data.create_kernel(
         psfs=psfs,
@@ -259,13 +261,13 @@ def run(stack_inputs: dict, stack_params: dict,
     # Always use the low-memory shift-and-stack path. Keep the post-shift
     # stages in fp16 as well to reduce resident GPU memory.
     post_torch_dtype = torch.float16
-    logging.debug(("Dtypes: initial_shift=%s, post_shift=%s, low_mem_tile_w=%s"),
+    logger.debug(("Dtypes: initial_shift=%s, post_shift=%s, low_mem_tile_w=%s"),
                   torch_dtype, post_torch_dtype, low_mem_tile_w)
 
     # set device value based on gpu availability.
     device = data.get_device()
     # push the data to the device for tourch shift-and-stack
-    logging.debug(f"Loading data onto {device}")
+    logger.debug(f"Loading data onto {device}")
     datas = torch.as_tensor(np_datas, dtype=torch_dtype, device=device)
     inv_variances = torch.as_tensor(np_inv_variances,
                                     dtype=torch_dtype, device=device)
@@ -274,7 +276,7 @@ def run(stack_inputs: dict, stack_params: dict,
     _ = torch.rot90(kernel, k=2, dims=(3, 4))
 
     # convolve pixels and variances with the kernels.
-    logging.info(f"Convolving {n_im} images and variances with kernel")
+    logger.info(f"Convolving {n_im} images and variances with kernel")
     for ir in range(n_im):
         datas[0, 0, ir, :, :] = torch.conv2d(
             datas[:, :, ir, :, :]*inv_variances[:, :, ir, :, :],
@@ -284,13 +286,13 @@ def run(stack_inputs: dict, stack_params: dict,
             kernel[:, :, ir, :, :]*kernel[:, :, ir, :, :], padding='same')
 
     if n_keep > len(rates):
-        logging.warn((f"Number of stack rate: {len(rates)}"
+        logger.warning((f"Number of stack rate: {len(rates)}"
                       f"is smaller than request n_keep {n_keep}. "
                       f"Only keeping {len(rates)} detections per pixel"))
         n_keep = min(n_keep, len(rates))
 
-    logging.info("Using low-memory initial shift-and-stack stage")
-    logging.debug("run_shifts_topk dtype: work=%s output=%s",
+    logger.info("Using low-memory initial shift-and-stack stage")
+    logger.debug("run_shifts_topk dtype: work=%s output=%s",
                   torch_dtype, torch_dtype)
     top_snr, top_alpha, top_rate_idx = utils.run_shifts_topk(
         datas=datas,
@@ -322,15 +324,15 @@ def run(stack_inputs: dict, stack_params: dict,
     # Check n_bright_test values between test_low and
     # test_high fraction of the estimated value
     # pad the data and variance arrays
-    logging.debug("Post-shift tensor dtype: %s", post_torch_dtype)
-    logging.debug(f"Creating im_datas with shape {np_datas.shape}")
+    logger.debug("Post-shift tensor dtype: %s", post_torch_dtype)
+    logger.debug(f"Creating im_datas with shape {np_datas.shape}")
     im_datas = functional.pad(torch.as_tensor(np_datas,
                                               dtype=post_torch_dtype,
                                               device=device),
                               (khw, khw, khw, khw))
     del np_datas  # I don't think this is used again.
     gc.collect()
-    logging.debug(f"Creating inv_vars with shape {np_inv_variances.shape}")
+    logger.debug(f"Creating inv_vars with shape {np_inv_variances.shape}")
     inv_vars = functional.pad(
         torch.as_tensor(
             np.asarray(0.5, dtype=dtype) * np_inv_variances,
@@ -351,8 +353,8 @@ def run(stack_inputs: dict, stack_params: dict,
                                          test_low=0.85,
                                          word_dtype=post_torch_dtype)
 
-    logging.info(f"Number of detections: {len(detections)}")
-    logging.info(f"Number kept: {len(keeps)}")
+    logger.info(f"Number of detections: {len(detections)}")
+    logger.info(f"Number kept: {len(keeps)}")
     filt_detections = np.copy(detections[keeps])
     del keeps
 
@@ -388,14 +390,14 @@ def run(stack_inputs: dict, stack_params: dict,
     gc.collect()
 
     n_det = len(clust_detections)
-    logging.info(("Number of sources kept after "
+    logger.info(("Number of sources kept after "
                   f"brightness and peak location filtering: {n_det}."))
 
     w = np.where(clust_detections[:, 5] >= trim_snr)
     clust_detections = clust_detections[w]
     clust_stamps = clust_stamps[w]
     n_det = len(clust_detections)
-    logging.info(("Number of sources kept after "
+    logger.info(("Number of sources kept after "
                   f"final SNR trim: {n_det}."))
 
     clust_detection_matches = match_detections_to_plants(
@@ -405,7 +407,7 @@ def run(stack_inputs: dict, stack_params: dict,
         dist_max=dist_max,
         dist_rate_max=dist_rate_max,
         detection_type='det_clust')
-    logging.info("Clustered detection/plant matches before position filter: %d",
+    logger.info("Clustered detection/plant matches before position filter: %d",
                  len(clust_detection_matches))
     debug_detection_indices = None
     debug_output_dir = None
@@ -438,7 +440,7 @@ def run(stack_inputs: dict, stack_params: dict,
         final_stamps = None
     n_det = len(final_detections)
     # clust_stamps = clust_stamps[w]
-    logging.info(f'Number of candidates {n_det}')
+    logger.info(f'Number of candidates {n_det}')
     # remove these memory cleanups as they aren't needed at this point
     # del im_datas, inv_vars, c, cv, kernel
     # gc.collect()
@@ -456,7 +458,7 @@ def run(stack_inputs: dict, stack_params: dict,
         dist_max=dist_max,
         dist_rate_max=dist_rate_max)
 
-    logging.info(f"Numer of plants found {(plants['num_match'] > 0).sum()}")
+    logger.info(f"Numer of plants found {(plants['num_match'] > 0).sum()}")
     plants.write(plant_matches_filename,
                  format='ascii.commented_header',
                  overwrite=True)
@@ -466,7 +468,7 @@ def run(stack_inputs: dict, stack_params: dict,
     detection_matches.write(detection_matches_filename,
                             format='ascii.commented_header',
                             overwrite=True)
-    logging.info("Wrote plant/detection join table to: %s",
+    logger.info("Wrote plant/detection join table to: %s",
                  detection_matches_filename)
 
     args = np.argsort(final_detections[:, 5])[::-1]
@@ -474,7 +476,7 @@ def run(stack_inputs: dict, stack_params: dict,
     if final_stamps is not None:
         final_stamps = final_stamps[args]
 
-    logging.info(f"Saving to: {results_filename}")
+    logger.info(f"Saving to: {results_filename}")
     with open(results_filename, 'w') as han:
         for i in range(len(final_detections)):
             rx = rates[round(final_detections[i, 2]), 0]

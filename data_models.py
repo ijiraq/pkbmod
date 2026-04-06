@@ -10,6 +10,9 @@ import numpy as np
 import re
 from typing import List
 
+logger = logging.getLogger(__name__)
+
+
 def read_flag_list_from_file(flags_fn) -> [str]:
     """Read the list of flags to mask
     """
@@ -21,7 +24,7 @@ def read_flag_list_from_file(flags_fn) -> [str]:
             key = line.split()[0]
             flag_keys.append(key)
 
-    logging.debug(f"FLAG_KEYS: {flag_keys}")
+    logger.debug(f"FLAG_KEYS: {flag_keys}")
     return flag_keys
 
 
@@ -46,7 +49,7 @@ class StackParams(object):
     variance_trim: float = 1.3  # factor above median variance to mask pixels
 
     def save(self) -> None:
-        logging.info(f"Saving params to {self.params_filename}")
+        logger.info(f"Saving params to {self.params_filename}")
         with open(self.params_filename, 'w+') as han:
             json.dump(asdict(self), han)
 
@@ -117,9 +120,9 @@ class ExtractedDataModel(object):
             variances[idx][w] = np.nan
             datas[idx][w] = 0.0
             nan_med_variance = np.nanmedian(variances[idx])
-            logging.debug((f"{im_nums[idx]} {dmjds[idx]} {nan_med_variance}"))
+            logger.debug((f"{im_nums[idx]} {dmjds[idx]} {nan_med_variance}"))
             if np.isnan(nan_med_variance):
-                logging.debug('Skipping image {im_nums[idx]} due to nans.')
+                logger.debug('Skipping image {im_nums[idx]} due to nans.')
                 for key in self.stack_inputs:
                     _ = self._stack_inputs[key].pop(idx)
             else:
@@ -157,7 +160,7 @@ class ExtractedDataModel(object):
         VARIANCE_EXTNO = 3
         datas, masks, variances = [], [], []
         dmjds, psfs, fwhms, im_nums = [], [], [], []
-        logging.debug("Creating numpy data lists to pack data onto GPU with.")
+        logger.debug("Creating numpy data lists to pack data onto GPU with.")
         for im_num in self.warps:
             hdul = self.warps[im_num]
             datas.append(np.asarray(hdul[DATA_EXTNO].data,
@@ -171,7 +174,7 @@ class ExtractedDataModel(object):
                                   dtype=self.data_dtype)
             psfs.append(psf_data/np.sum(psf_data))
             im_nums.append(im_num)
-        logging.debug(f"Using {len(datas)} images.")
+        logger.debug(f"Using {len(datas)} images.")
         self._stack_inputs = {
             'datas': datas,
             'masks': masks,
@@ -204,7 +207,7 @@ class ExtractedDataModel(object):
         if self._bitmask is not None:
             return self._bitmask
         if self.bitmask_filename is not None:
-            logging.debug("LOADNIG BITMASK FROM {self.bitmask_filename}")
+            logger.debug("LOADNIG BITMASK FROM {self.bitmask_filename}")
             with open(self.bitmask_filename) as han:
                 self._bitmask = {}
                 for line in han.readlines():
@@ -213,7 +216,7 @@ class ExtractedDataModel(object):
                     s = line.split(': ')
                     key, val = s[0], int(float(s[1]))
                     self._bitmask[key] = val
-            logging.debug(f"FILE BITMASK: {self._bitmask}")
+            logger.debug(f"FILE BITMASK: {self._bitmask}")
         else:
             logging.debug(f"LOADING BITMASK FROM {self.ref_visit} HEADER")
             header = self.warps[self.ref_visit][self.MASK_EXT].header
@@ -223,7 +226,7 @@ class ExtractedDataModel(object):
             bitmask = header[f"{self.MASK_PREFIX}*"]
             self._bitmask = {x.removeprefix(self.MASK_PREFIX): bitmask[x]
                              for x in bitmask}
-            logging.debug(f"HEADER BITMASK: {self._bitmask}")
+            logger.debug(f"HEADER BITMASK: {self._bitmask}")
         return self._bitmask
 
     @property
@@ -234,7 +237,7 @@ class ExtractedDataModel(object):
             return self._properties
         prop_filename = (f"{self.path}/"
                          f"{self.properties_dataset_type}_{self.chip}.txt")
-        logging.debug(f"Loading properties from {prop_filename}")
+        logger.debug(f"Loading properties from {prop_filename}")
         table = Table.read(prop_filename, format='ascii.commented_header')
         # compute delta mjd as the time since the first exposure plus
         # 1/2 exposure time.
@@ -246,7 +249,7 @@ class ExtractedDataModel(object):
             w = table['visit'] == visit
             row = table[w][0]
             properties[visit] = row['dmjd', 'fwhm']
-        logging.debug(f"Loaded {len(properties)} property records")
+        logger.debug(f"Loaded {len(properties)} property records")
         self._properties = properties
         return self._properties
 
@@ -259,7 +262,7 @@ class ExtractedDataModel(object):
         filelist.sort()
         self._psfs = {self.visit_number_from_filename(x): fits.open(x)
                       for x in filelist}
-        logging.info(f"Loaded {len(self._psfs)} psfs")
+        logger.info(f"Loaded {len(self._psfs)} psfs")
         return self._psfs
 
     @property
@@ -293,7 +296,7 @@ class ExtractedDataModel(object):
         filelist.sort()
         self._warps = {self.visit_number_from_filename(x): fits.open(x)
                        for x in filelist}
-        logging.info(f"Loaded {len(self._warps)} warped difference images")
+        logger.info(f"Loaded {len(self._warps)} warped difference images")
         return self._warps
 
     @property

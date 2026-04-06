@@ -9,6 +9,8 @@ from astropy.io import fits
 
 from sns_data_nh import get_device
 
+logger = logging.getLogger(__name__)
+
 
 def run_shifts(
     datas,
@@ -22,7 +24,7 @@ def run_shifts(
     word_dtype=torch.float16,
 ):
     n_im = len(datas[0, 0, :])
-    logging.debug(f"NUM IM {n_im}")
+    logger.debug(f"NUM IM {n_im}")
     c = torch.zeros_like(datas)
     c[0, 0, 0] = datas[0, 0, 0]
     cv = torch.zeros_like(datas)
@@ -86,8 +88,8 @@ def run_shifts(
         gc.collect()
         torch.cuda.empty_cache()
 
-    logging.info(f"Max per image flux of candidates: {torch.max(alpha_image)}")
-    logging.info(f"Max per image snr of candidates: {torch.max(snr_image)}")
+    logger.info(f"Max per image flux of candidates: {torch.max(alpha_image)}")
+    logger.info(f"Max per image snr of candidates: {torch.max(snr_image)}")
 
     del c, cv, datas, inv_variances, PSI, PHI
     gc.collect()
@@ -111,8 +113,8 @@ def trim_negative_snr(
 
         where = SNR > 0
         inds = where.nonzero()[:, 0]
-        logging.debug(f"keep index length: {inds.shape}")
-        logging.debug(f"length of indexs: {(s[inds]).shape}")
+        logger.debug(f"keep index length: {inds.shape}")
+        logger.debug(f"length of indexs: {(s[inds]).shape}")
         if n == 0:
             keeps = np.zeros((len(inds), 7), dtype=dtype)
             keeps[:, 0] = idx[inds]
@@ -123,7 +125,7 @@ def trim_negative_snr(
             keeps[:, 5] = SNR.reshape(A * B)[inds]
         else:
             nkeeps = np.zeros((len(inds), 7), dtype=dtype)
-            logging.debug(f"Keeps size: {nkeeps.shape}")
+            logger.debug(f"Keeps size: {nkeeps.shape}")
             nkeeps[:, 0] = idx[inds]
             nkeeps[:, 1] = idy[inds]
             nkeeps[:, 2] = s[inds]
@@ -132,7 +134,7 @@ def trim_negative_snr(
             nkeeps[:, 5] = SNR.reshape(A * B)[inds]
             keeps = np.concatenate([keeps, nkeeps])
 
-    logging.info(f"Keeping {len(keeps)} candidates")
+    logger.info(f"Keeping {len(keeps)} candidates")
 
     detections = np.array(keeps)
     del keeps, idx, idy
@@ -142,7 +144,7 @@ def trim_negative_snr(
 def trim_negative_flux(detections):
     pos = np.where(detections[:, 4] > 0)
     detections = detections[pos]
-    logging.info(f"Keeping {len(detections)} positive flux candidates")
+    logger.info(f"Keeping {len(detections)} positive flux candidates")
     return detections
 
 
@@ -210,7 +212,7 @@ def brightness_filter(
         arg_mins_cpu = arg_mins.cpu()
 
         W = np.where((arg_mins_cpu != 0) & (arg_mins_cpu != (n_bright_test - 1)))
-        logging.debug(
+        logger.debug(
             (
                 f"{ir + 1}/{len(rates)}, pre: {len(w[0])}, "
                 f"post: {len(W[0])},  in time {time.time() - t1}"
@@ -220,7 +222,7 @@ def brightness_filter(
             keeps = W[0]
         else:
             keeps = np.concatenate([keeps, W[0]])
-    logging.info(
+    logger.info(
         (
             f"Number kept after brightness filter {len(keeps)}"
             f" of {len(detections)} total detections."
@@ -435,7 +437,7 @@ def position_filter(
     c[0, 0, 0] = im_datas[0, 0, 0]
 
     write_debug = (
-        logging.getLogger().isEnabledFor(logging.DEBUG)
+        logger.isEnabledFor(logging.DEBUG)
         and debug_detection_indices is not None
         and debug_output_dir is not None
     )
@@ -479,7 +481,7 @@ def position_filter(
 
             min_ix -= n_offsets
             min_iy -= n_offsets
-            logging.debug(
+            logger.debug(
                 (
                     f"position 'Xi^2' match for sources at {x},{y} at rate:"
                     f"{rates[ir]} is offset {min_ix},{min_iy}"
@@ -523,21 +525,21 @@ def position_filter(
                 ]
                 dump_path = debug_dir / f"position_filter_det_{int(idx):05d}.fits"
                 fits.HDUList(hdus).writeto(dump_path, overwrite=True)
-                logging.debug("Wrote position_filter debug cubes to %s", dump_path)
+                logger.debug("Wrote position_filter debug cubes to %s", dump_path)
 
     keeps = np.array(keeps)
     grid_detections = clust_detections[keeps]
     grid_stamps = clust_stamps[keeps]
-    logging.debug(f"First grid {grid_detections[0]}")
-    logging.debug(f"First cluster detection {clust_detections[0]}")
-    logging.info(
+    logger.debug(f"First grid {grid_detections[0]}")
+    logger.debug(f"First cluster detection {clust_detections[0]}")
+    logger.info(
         (
             "Number of sources kept after the cluster "
             f"filtering: {len(clust_detections)}."
         )
     )
 
-    logging.info(
+    logger.info(
         (
             "Number of sources kept after the positional "
             f"grid minimum search: {len(grid_detections)}."
@@ -587,7 +589,7 @@ def brightness_filter_fast(
     im_idx = torch.arange(n_im, device=device)
 
     keeps_list = []
-    log_info_enabled = logging.getLogger().isEnabledFor(logging.INFO)
+    log_info_enabled = logger.isEnabledFor(logging.INFO)
 
     for ir in range(len(rates)):
         t1 = time.time()
@@ -697,7 +699,7 @@ def brightness_filter_fast(
             kept_idx = np.array([], dtype=np.intp)
 
         if log_info_enabled:
-            logging.info(
+            logger.info(
                 ("%d/%d, vx: %.5f, vy: %.5f, pre: %d, post: %d, in time %.3f"),
                 ir + 1,
                 len(rates),
@@ -712,7 +714,7 @@ def brightness_filter_fast(
     else:
         keeps = np.array([], dtype=np.intp)
 
-    logging.info(
+    logger.info(
         (
             f"Number kept after brightness filter {len(keeps)} "
             f"of {len(detections)} total detections."
@@ -814,7 +816,7 @@ def run_shifts_topk(
             top_rate_idx_cpu[:, :, x0:x1] = new_rate.cpu()
             x0 = x1
 
-        logging.debug(f"Low-mem shift {ir + 1}/{len(rates)} complete")
+        logger.debug(f"Low-mem shift {ir + 1}/{len(rates)} complete")
 
     return top_snr_cpu, top_alpha_cpu, top_rate_idx_cpu
 
