@@ -55,11 +55,12 @@ def match_detections_to_plants(plants: Table,
     det_x = detections[:, 0]
     det_y = detections[:, 1]
 
-    for plant_index in range(len(plants)):
-        dist_sq = ((plants['x0'][plant_index] - det_x)**2 +
-                   (plants['y0'][plant_index] - det_y)**2)
-        dist_rate_sq = ((plants['rate_x'][plant_index] - det_rx)**2 +
-                        (plants['rate_y'][plant_index] - det_ry)**2)
+    for idx in range(len(plants)):
+        plant_index = plants['injection_id'][idx]
+        dist_sq = ((plants['x0'][idx] - det_x)**2 +
+                   (plants['y0'][idx] - det_y)**2)
+        dist_rate_sq = ((plants['rate_x'][idx] - det_rx)**2 +
+                        (plants['rate_y'][idx] - det_ry)**2)
         matched = np.where((dist_sq < dist_max**2) &
                            (dist_rate_sq < dist_rate_max**2))[0]
         for detection_index in matched:
@@ -69,10 +70,10 @@ def match_detections_to_plants(plants: Table,
             columns['dist_r'].append(float(np.sqrt(dist_sq[detection_index])))
             columns['dist_v'].append(
                 float(np.sqrt(dist_rate_sq[detection_index])))
-            columns['plant_x0'].append(float(plants['x0'][plant_index]))
-            columns['plant_y0'].append(float(plants['y0'][plant_index]))
-            columns['plant_rate_x'].append(float(plants['rate_x'][plant_index]))
-            columns['plant_rate_y'].append(float(plants['rate_y'][plant_index]))
+            columns['plant_x0'].append(float(plants['x0'][idx]))
+            columns['plant_y0'].append(float(plants['y0'][idx]))
+            columns['plant_rate_x'].append(float(plants['rate_x'][idx]))
+            columns['plant_rate_y'].append(float(plants['rate_y'][idx]))
             columns['det_x'].append(float(det_x[detection_index]))
             columns['det_y'].append(float(det_y[detection_index]))
             columns['det_rate_x'].append(float(det_rx[detection_index]))
@@ -140,16 +141,17 @@ def summarize_plant_matches(plants: Table,
     final_detections = detection_types[final_detection_type]
     if len(final_detections) > 0:
         final_rx, final_ry = _detection_rates(final_detections, rates)
-        for plant_index in range(len(plants)):
-            dist_sq = ((plants['x0'][plant_index] - final_detections[:, 0])**2 +
-                       (plants['y0'][plant_index] - final_detections[:, 1])**2)
-            dist_rate_sq = ((plants['rate_x'][plant_index] - final_rx)**2 +
-                            (plants['rate_y'][plant_index] - final_ry)**2)
-            plants['min_dist_r'][plant_index] = np.min(dist_sq)**0.5
-            plants['min_dist_v'][plant_index] = np.min(dist_rate_sq)**0.5
+        for idx in range(len(plants)):
+            plant_index = plants['injection_id'][idx]
+            dist_sq = ((plants['x0'][idx] - final_detections[:, 0])**2 +
+                       (plants['y0'][idx] - final_detections[:, 1])**2)
+            dist_rate_sq = ((plants['rate_x'][idx] - final_rx)**2 +
+                            (plants['rate_y'][idx] - final_ry)**2)
+            plants['min_dist_r'][idx] = np.min(dist_sq)**0.5
+            plants['min_dist_v'][idx] = np.min(dist_rate_sq)**0.5
             if len(final_matches) > 0:
                 matched = final_matches['plant_index'] == plant_index
-                plants['num_match'][plant_index] = int(np.sum(matched))
+                plants['num_match'][idx] = int(np.sum(matched))
     all_matches = vstack(match_tables, metadata_conflicts='silent') if match_tables else final_matches.copy()
     return plants, all_matches
 
