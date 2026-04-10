@@ -31,15 +31,17 @@ def match_detections_to_plants(plants: Table,
                                detection_type: str) -> Table:
     """Create a join table between plants and matched detections."""
     columns = {
-        'plant_index': [],
+        'index': [],
         'detection_index': [],
         'detection_type': [],
         'dist_r': [],
         'dist_v': [],
+        'plant_id': [],
         'plant_x0': [],
         'plant_y0': [],
         'plant_rate_x': [],
         'plant_rate_y': [],
+        'plant_mag': [],
         'det_x': [],
         'det_y': [],
         'det_rate_x': [],
@@ -56,7 +58,6 @@ def match_detections_to_plants(plants: Table,
     det_y = detections[:, 1]
 
     for idx in range(len(plants)):
-        plant_index = plants['plant_id'][idx]
         dist_sq = ((plants['x0'][idx] - det_x)**2 +
                    (plants['y0'][idx] - det_y)**2)
         dist_rate_sq = ((plants['rate_x'][idx] - det_rx)**2 +
@@ -64,8 +65,9 @@ def match_detections_to_plants(plants: Table,
         matched = np.where((dist_sq < dist_max**2) &
                            (dist_rate_sq < dist_rate_max**2))[0]
         for detection_index in matched:
-            columns['plant_index'].append(plant_index)
+            columns['index'].append(idx)
             columns['detection_index'].append(int(detection_index))
+            columns['plant_id'].append(plants['plant_id'][idx])
             columns['detection_type'].append(detection_type)
             columns['dist_r'].append(float(np.sqrt(dist_sq[detection_index])))
             columns['dist_v'].append(
@@ -74,6 +76,7 @@ def match_detections_to_plants(plants: Table,
             columns['plant_y0'].append(float(plants['y0'][idx]))
             columns['plant_rate_x'].append(float(plants['rate_x'][idx]))
             columns['plant_rate_y'].append(float(plants['rate_y'][idx]))
+            columns['plant_mag'].append(float(plants['mag'][idx]))
             columns['det_x'].append(float(det_x[detection_index]))
             columns['det_y'].append(float(det_y[detection_index]))
             columns['det_rate_x'].append(float(det_rx[detection_index]))
@@ -110,7 +113,7 @@ def summarize_plant_matches(plants: Table,
             detection_type=detection_type)
         if len(match_table) > 0:
             match_tables.append(match_table)
-            matched_plants = np.unique(match_table['plant_index'])
+            matched_plants = np.unique(match_table['index'])
         else:
             matched_plants = np.array([], dtype=int)
         plants[detection_type][:] = 0
@@ -121,7 +124,8 @@ def summarize_plant_matches(plants: Table,
 
     if final_matches is None:
         final_matches = Table({
-            'plant_index': [],
+            'index': [],
+            'plant_id': [],
             'detection_index': [],
             'detection_type': [],
             'dist_r': [],
@@ -130,6 +134,7 @@ def summarize_plant_matches(plants: Table,
             'plant_y0': [],
             'plant_rate_x': [],
             'plant_rate_y': [],
+            'plant_mag': [],
             'det_x': [],
             'det_y': [],
             'det_rate_x': [],
@@ -142,7 +147,6 @@ def summarize_plant_matches(plants: Table,
     if len(final_detections) > 0:
         final_rx, final_ry = _detection_rates(final_detections, rates)
         for idx in range(len(plants)):
-            plant_index = plants['plant_id'][idx]
             dist_sq = ((plants['x0'][idx] - final_detections[:, 0])**2 +
                        (plants['y0'][idx] - final_detections[:, 1])**2)
             dist_rate_sq = ((plants['rate_x'][idx] - final_rx)**2 +
@@ -150,7 +154,7 @@ def summarize_plant_matches(plants: Table,
             plants['min_dist_r'][idx] = np.min(dist_sq)**0.5
             plants['min_dist_v'][idx] = np.min(dist_rate_sq)**0.5
             if len(final_matches) > 0:
-                matched = final_matches['plant_index'] == plant_index
+                matched = final_matches['plant_id'] ==  plants['plant_id'][idx]
                 plants['num_match'][idx] = int(np.sum(matched))
     all_matches = vstack(match_tables, metadata_conflicts='silent') if match_tables else final_matches.copy()
     return plants, all_matches
