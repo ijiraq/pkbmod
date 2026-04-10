@@ -157,8 +157,9 @@ class ButlerDataModel:
                  f"AND tract={self.tract} "
                  f"AND patch={self.patch} "
                  f"AND band='{self.band}'")
-        limit = 10 if logger.isEnabledFor(logging.DEBUG) else None
-        logger.debug(
+        limit = None
+        # limit = 10 if logger.isEnabledFor(logging.DEBUG) else None
+        logger.info(
             "Getting %s datasets using\n where:%s\n limit:%s",
             self.dataset_type,
             where,
@@ -233,8 +234,8 @@ class ButlerDataModel:
                    keys=['injection_id'])
         cat['rate_x'] = (cat['X0_2']-cat['X0_1'])/dt
         cat['rate_y'] = (cat['Y0_2']-cat['Y0_1'])/dt
-        cat = cat['injection_id', 'X0_1','Y0_1','rate_x', 'rate_y', 'mag_1']
         logger.debug(f"Full injected source catalog:\n{cat}")
+        cat = cat['injection_id', 'X0_1','Y0_1','rate_x', 'rate_y', 'mag_1']
         cat['injection_id'].name = 'id'
         cat['X0_1'].name = 'x0'
         cat['Y0_1'].name = 'y0'
@@ -253,6 +254,7 @@ class ButlerDataModel:
         im_nums: list[int] = []
 
         mjd0: float | None = None
+        logger.info("Loading {len(refs)} datasets from {self.butler}")
         for ref in refs:
             exposure = self.butler.get(ref)
             data, variance, mask = _exposure_to_arrays(exposure, self.data_dtype)
