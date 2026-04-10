@@ -254,7 +254,7 @@ class ButlerDataModel:
         im_nums: list[int] = []
 
         mjd0: float | None = None
-        logger.info("Loading {len(refs)} datasets from {self.butler}")
+        logger.info(f"Loading {len(refs)} datasets from {self.butler}")
         for ref in refs:
             exposure = self.butler.get(ref)
             data, variance, mask = _exposure_to_arrays(exposure, self.data_dtype)
