@@ -56,7 +56,7 @@ def match_detections_to_plants(plants: Table,
     det_y = detections[:, 1]
 
     for idx in range(len(plants)):
-        plant_index = plants['injection_id'][idx]
+        plant_index = plants['plant_id'][idx]
         dist_sq = ((plants['x0'][idx] - det_x)**2 +
                    (plants['y0'][idx] - det_y)**2)
         dist_rate_sq = ((plants['rate_x'][idx] - det_rx)**2 +
@@ -142,7 +142,7 @@ def summarize_plant_matches(plants: Table,
     if len(final_detections) > 0:
         final_rx, final_ry = _detection_rates(final_detections, rates)
         for idx in range(len(plants)):
-            plant_index = plants['injection_id'][idx]
+            plant_index = plants['plant_id'][idx]
             dist_sq = ((plants['x0'][idx] - final_detections[:, 0])**2 +
                        (plants['y0'][idx] - final_detections[:, 1])**2)
             dist_rate_sq = ((plants['rate_x'][idx] - final_rx)**2 +

@@ -236,11 +236,11 @@ class ButlerDataModel:
         cat['rate_y'] = (cat['Y0_2']-cat['Y0_1'])/dt
         logger.debug(f"Full injected source catalog:\n{cat}")
         cat = cat['injection_id', 'X0_1','Y0_1','rate_x', 'rate_y', 'mag_1']
-        cat['injection_id'].name = 'id'
+        cat['injection_id'].name = 'plant_id'
         cat['X0_1'].name = 'x0'
         cat['Y0_1'].name = 'y0'
         cat['mag_1'].name = 'mag'
-        return cat['id','x0','y0', 'rate_x', 'rate_y', 'mag']
+        return cat['plant_id','x0','y0', 'rate_x', 'rate_y', 'mag']
 
     def _load_from_butler(self) -> dict[str, Any]:
         """Load the data from the butler and return a dictionary of arrays for stacking."""
