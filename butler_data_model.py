@@ -8,7 +8,7 @@ Typical dataset types for warped difference images include
 RA/Dec, then the per-visit calexp whose detector footprint contains that sky
 position is selected to provide the PSF.
 """
-import argparse
+import astropy.units as u
 from astropy.table import Table, vstack
 from astropy.time import Time
 from astropy.table import join
@@ -81,7 +81,10 @@ def _visit_mjd_mid(exposure, DateTime) -> float:
 
 
 class ButlerDataModel:
-    """Build the same ``stack_inputs`` dict as :class:`ExtractedDataModel`, from Butler queries."""
+    """Build the same ``stack_inputs`` dict as :class:`ExtractedDataModel`, from Butler queries.
+
+    Plant ``rate_x`` / ``rate_y`` are pixels per day (see :attr:`plants`).
+    """
 
     MAX_PIX_VALUE = 8000
     MIN_PIX_VALUE = -10000
@@ -134,6 +137,13 @@ class ButlerDataModel:
 
     @property
     def plants(self) -> Table:
+        """Injection truth table for :mod:`stack` / ``sns_data_nh``.
+
+        Columns include ``plant_id``, ``x0``, ``y0`` (reference pixels),
+        ``mag``, and ``rate_x``, ``rate_y``. The rate columns are average
+        motion in **pixels per day**, consistent with ``dmjds`` (day offsets)
+        and :func:`sns_data_nh.get_shift_rates`.
+        """
         if self._plants is None:
             self._plants = self._get_injected_source_catalog()
         return self._plants
@@ -195,15 +205,22 @@ class ButlerDataModel:
         return kernel, fwhm
 
     def _get_injected_source_catalog(self):
-        """Get the injected source catalog from the Butler.
-        
-        The injected source catalog is a table of sources that were injected into the difference images.
-        It is stored in the Butler as a dataset type of ``injected_calexp_catalog``.
-        The catalog is stored for each detector in the difference image, and we combine them into a single table.
+        """Load and merge injected-source catalogs from the Butler.
 
-        There is an error in the source injection code that causes the rate_ra and rate_dec columns to be incorrect
-        so we ignore them and compute the rates from the differences x1 and y0 between the first and last visit.
+        Dataset type ``injected_calexp_catalog`` holds per-detector tables for
+        each epoch; rows are stacked into one table per epoch, then joined on
+        ``injection_id`` across the first and last warp in ``self.refs``.
 
+        ``rate_ra`` / ``rate_dec`` from injection are unreliable, so ``rate_x``
+        and ``rate_y`` are derived from pixel motion between epochs:
+        ``(X0_final - X0_initial) / dt`` where ``dt`` is the elapsed time between
+        catalog ``day_obs`` values in **days** (``astropy.units``). The resulting
+        rates are **pixels per day**, matching the shift-and-stack convention
+        (``dmjds`` in days × rate in pixels/day).
+
+        Returns:
+            astropy.table.Table: ``plant_id``, ``x0``, ``y0``, ``rate_x``,
+            ``rate_y``, ``mag`` with rates in pixels/day.
         """
         data_id = {'initial': self.refs[0].dataId,
                    'final': self.refs[-1].dataId}
@@ -228,7 +245,7 @@ class ButlerDataModel:
             injected_source_catalogs[epoch] = vstack(injected_source_catalogs[epoch])
         t1 = Time(injected_source_catalogs['initial'].meta['day_obs'])
         t2 = Time(injected_source_catalogs['final'].meta['day_obs'])
-        dt = (t2-t1).to('hour').value
+        dt = (t2-t1).to(u.day).value
         cat = join(injected_source_catalogs['initial'], 
                    injected_source_catalogs['final'], 
                    keys=['injection_id'])
