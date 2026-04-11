@@ -304,22 +304,23 @@ def peak_offset_filter(stamps, filt_detections, peak_offset_max):
     X = gx[args]
     Y = gy[args]
     radial_d = ((X - b / 2) ** 2 + (Y - a / 2) ** 2) ** 0.5
-    w = np.where(radial_d < peak_offset_max)
-    filt_detections = filt_detections[w]
-    stamps = stamps[w]
-
-    return stamps, filt_detections
+    keep = np.where(radial_d < peak_offset_max)[0]
+    return keep
 
 
 # do predictive line clustering
-def predictive_line_cluster(
-    filt_detections, stamps, dmjds, dist_lim, min_samp=2, init_select_proc_distance=60
+def predictive_line_cluster_indices(
+    filt_detections, dmjds, dist_lim, min_samp=2, init_select_proc_distance=60
 ):
+    """Indices into ``filt_detections`` (and parallel ``stamps``) to keep.
 
+    Returns:
+        numpy.ndarray: 1D int indices, in the order clusters are accepted.
+    """
     proc_filt_detections = np.copy(filt_detections)
 
     proc_inds = np.arange(len(proc_filt_detections), dtype=int)
-    clust_detections, clust_inds = [], []
+    clust_inds = []
 
     while len(proc_filt_detections) > 0:
         arg_max = np.argmax(proc_filt_detections[:, 5])  # 5 - max on SNR
@@ -378,7 +379,6 @@ def predictive_line_cluster(
             | ((dist < dist_lim) & (drx == 0) & (dry == 0))
         )
         if len(clust[0]) >= min_samp:
-            clust_detections.append(proc_filt_detections[arg_max])
             clust_inds.append(proc_inds[arg_max])
 
         mask = np.ones(len(proc_filt_detections), dtype="bool")
@@ -386,10 +386,17 @@ def predictive_line_cluster(
         proc_filt_detections = proc_filt_detections[mask]
         proc_inds = proc_inds[mask]
 
-    clust_detections = np.array(clust_detections)
-    clust_stamps = stamps[np.array(clust_inds, dtype=int)]
+    return np.array(clust_inds, dtype=int)
 
-    return clust_detections, clust_stamps
+
+def predictive_line_cluster(
+    filt_detections, stamps, dmjds, dist_lim, min_samp=2, init_select_proc_distance=60
+):
+    """Backward-compatible wrapper: subset of ``filt_detections`` and ``stamps``."""
+    idx = predictive_line_cluster_indices(
+        filt_detections, dmjds, dist_lim, min_samp, init_select_proc_distance
+    )
+    return filt_detections[idx], stamps[idx]
 
 
 def position_filter(

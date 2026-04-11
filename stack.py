@@ -25,6 +25,7 @@ def _detection_rates(detections: np.ndarray,
 
 def match_detections_to_plants(plants: Table,
                                detections: np.ndarray,
+                               detection_indices: np.ndarray,
                                rates: np.ndarray,
                                dist_max: float,
                                dist_rate_max: float,
@@ -66,7 +67,7 @@ def match_detections_to_plants(plants: Table,
                            (dist_rate_sq < dist_rate_max**2))[0]
         for detection_index in matched:
             columns['index'].append(idx)
-            columns['detection_index'].append(int(detection_index))
+            columns['detection_index'].append(int(detection_indices[detection_index]))
             columns['plant_id'].append(plants['plant_id'][idx])
             columns['detection_type'].append(detection_type)
             columns['dist_r'].append(float(np.sqrt(dist_sq[detection_index])))
@@ -89,11 +90,16 @@ def match_detections_to_plants(plants: Table,
 
 def summarize_plant_matches(plants: Table,
                             detection_types: dict[str, np.ndarray],
+                            detections: np.ndarray,
                             rates: np.ndarray,
                             dist_max: float,
                             dist_rate_max: float) -> tuple[Table, Table]:
-    """Annotate plants with per-stage match flags and return a join table."""
-    for column in ["min_dist_r", "min_dist_v"]:
+    """Annotate plants with per-stage match flags and return a join table.
+
+    For each plant, ``flux`` and ``snr`` are taken from the ``det_final`` match
+    with highest ``det_snr`` when at least one such match exists; otherwise NaN.
+    """
+    for column in ["min_dist_r", "min_dist_v", "flux", "snr"]:
         plants[column] = np.nan
     for column in detection_types:
         plants[column] = 0
@@ -103,10 +109,16 @@ def summarize_plant_matches(plants: Table,
     final_detection_type = next(reversed(detection_types))
     final_matches = None
 
-    for detection_type, detections in detection_types.items():
+    # ``detection_types`` maps stage name -> row indices into the master
+    # ``detections`` table (must not shadow that array in the loop).
+    master_detections = detections
+    for detection_type, row_indices in detection_types.items():
+        row_indices = np.asarray(row_indices, dtype=int)
+        sub_detections = master_detections[row_indices]
         match_table = match_detections_to_plants(
             plants=plants,
-            detections=detections,
+            detections=sub_detections,
+            detection_indices=row_indices,
             rates=rates,
             dist_max=dist_max,
             dist_rate_max=dist_rate_max,
@@ -143,7 +155,7 @@ def summarize_plant_matches(plants: Table,
             'det_snr': [],
         })
 
-    final_detections = detection_types[final_detection_type]
+    final_detections = master_detections[detection_types[final_detection_type]]
     if len(final_detections) > 0:
         final_rx, final_ry = _detection_rates(final_detections, rates)
         for idx in range(len(plants)):
@@ -154,8 +166,13 @@ def summarize_plant_matches(plants: Table,
             plants['min_dist_r'][idx] = np.min(dist_sq)**0.5
             plants['min_dist_v'][idx] = np.min(dist_rate_sq)**0.5
             if len(final_matches) > 0:
-                matched = final_matches['plant_id'] ==  plants['plant_id'][idx]
+                matched = final_matches['plant_id'] == plants['plant_id'][idx]
                 plants['num_match'][idx] = int(np.sum(matched))
+                if plants['num_match'][idx] > 0:
+                    sub = final_matches[matched]
+                    imax = int(np.argmax(sub['det_snr']))
+                    plants['flux'][idx] = float(sub['det_flux'][imax])
+                    plants['snr'][idx] = float(sub['det_snr'][imax])
     all_matches = vstack(match_tables, metadata_conflicts='silent') if match_tables else final_matches.copy()
     return plants, all_matches
 
@@ -325,6 +342,7 @@ def run(stack_inputs: dict, stack_params: dict,
     torch.cuda.empty_cache()
     # trim the flux negative sources
     detections = utils.trim_negative_flux(detections)
+    detections_idx = np.arange(len(detections))
 
     # now apply the brightness filter.
     # Check n_bright_test values between test_low and
@@ -344,7 +362,7 @@ def run(stack_inputs: dict, stack_params: dict,
             np.asarray(0.5, dtype=dtype) * np_inv_variances,
             dtype=post_torch_dtype,
             device=device), (khw, khw, khw, khw))
-    del np_inv_variances
+    del np_inv_variances  # not used again
     gc.collect()
 
     c = torch.zeros_like(im_datas)
@@ -361,7 +379,8 @@ def run(stack_inputs: dict, stack_params: dict,
 
     logger.info(f"Number of detections: {len(detections)}")
     logger.info(f"Number kept: {len(keeps)}")
-    filt_detections = np.copy(detections[keeps])
+    # filt_detections = np.copy(detections[keeps])
+    filt_detections_idx = detections_idx[keeps]
     del keeps
 
     im_masks = functional.pad(
@@ -369,69 +388,76 @@ def run(stack_inputs: dict, stack_params: dict,
         (khw, khw, khw, khw))
     del np_masks
 
-    # create the stamps
+    # Stamps are built only for the brightness-filtered subset; row k matches
+    # ``filt_detections_idx[k]`` in the master ``detections`` table.
     mean_stamps = utils.create_stamps(im_datas, im_masks,
                                       c, cv, dmjds, rates,
-                                      filt_detections, khw)
+                                      detections[filt_detections_idx], khw)
     del im_masks
     gc.collect()
     torch.cuda.empty_cache()
 
     stamps = mean_stamps
     # trim the candidates with peak offset more than peak_offset_max pixels
-    stamps, filt_detections = utils.peak_offset_filter(stamps,
-                                                       filt_detections,
-                                                       peak_offset_max)
+    peak_keep = utils.peak_offset_filter(
+        stamps, detections[filt_detections_idx], peak_offset_max)
+    stamps = stamps[peak_keep]
+    filt_detections_idx = filt_detections_idx[peak_keep]
 
     save_filt_detections = False
     if save_filt_detections:
         with open('filt_detections.npy', 'wb') as han:
-            np.save(han, filt_detections)
+            np.save(han, detections[filt_detections_idx])
 
-    # apply predictive clustering
-    clust_detections, clust_stamps = utils.predictive_line_cluster(
-        filt_detections, stamps, dmjds, dist_lim, min_samp,
+    # Clustering indices are into the current filt subset (parallel to stamps).
+    clust_filt_idx = utils.predictive_line_cluster_indices(
+        detections[filt_detections_idx], dmjds, dist_lim, min_samp,
         init_select_proc_distance=60)
-    del stamps
     gc.collect()
 
-    n_det = len(clust_detections)
     logger.info(("Number of sources kept after "
-                  f"brightness and peak location filtering: {n_det}."))
+                  f"brightness and peak location filtering: {len(clust_filt_idx)}."))
 
-    w = np.where(clust_detections[:, 5] >= trim_snr)
-    clust_detections = clust_detections[w]
-    clust_stamps = clust_stamps[w]
-    n_det = len(clust_detections)
+    clust_master_idx = filt_detections_idx[clust_filt_idx]
+    snr_trim = np.where(detections[clust_master_idx, 5] >= trim_snr)[0]
+    clust_filt_idx = clust_filt_idx[snr_trim]
+    clust_master_idx = clust_master_idx[snr_trim]
     logger.info(("Number of sources kept after "
-                  f"final SNR trim: {n_det}."))
+                  f"final SNR trim: {len(clust_master_idx)}."))
 
     clust_detection_matches = match_detections_to_plants(
         plants=plants,
-        detections=clust_detections,
+        detections=detections[clust_master_idx],
+        detection_indices=clust_master_idx,
         rates=rates,
         dist_max=dist_max,
         dist_rate_max=dist_rate_max,
         detection_type='det_clust')
     logger.info("Clustered detection/plant matches before position filter: %d",
                  len(clust_detection_matches))
-    debug_detection_indices = None
-    debug_output_dir = None
-    if len(clust_detection_matches) > 0:
-        debug_detection_indices = np.unique(
-            np.asarray(clust_detection_matches['detection_index'], dtype=int))
-        debug_output_dir = (
-            Path(plant_matches_filename).with_suffix('').parent /
-            f"{Path(plant_matches_filename).with_suffix('').name}.position_filter_debug"
-        )
-
     cv[0, 0, 0] = inv_vars[0, 0, 0]
-    
+
+
+    final_detections = detections[clust_master_idx]
+    final_detection_indices = clust_master_idx
+    final_stamps = stamps[clust_filt_idx]
+
     if False:
-        # Just skip the position filter for now
+        # Skip the position filter for now
+        #TODO: Add position filter back in here when we have a way to debug it
+
+        debug_detection_indices = None
+        debug_output_dir = None
+        if len(clust_detection_matches) > 0:
+            debug_detection_indices = np.unique(
+                np.asarray(clust_detection_matches['detection_index'], dtype=int))
+            debug_output_dir = (
+                Path(plant_matches_filename).with_suffix('').parent /
+                f"{Path(plant_matches_filename).with_suffix('').name}.position_filter_debug"
+            )
 
         grid_detections, grid_stamps = utils.position_filter(
-            clust_detections, clust_stamps, im_datas, inv_vars,
+            detections[clust_master_idx], clust_stamps, im_datas, inv_vars,
             c, cv, kernel, dmjds, rates, khw, n_offsets=11,
             debug_detection_indices=debug_detection_indices,
             debug_output_dir=debug_output_dir)
@@ -440,26 +466,19 @@ def run(stack_inputs: dict, stack_params: dict,
         final_stamps = grid_stamps[w]
         final_detections = grid_detections[w]
         del grid_detections, grid_stamps
-    else:
-        w = np.where(clust_detections[:, 5] >= trim_snr)
-        final_detections = clust_detections[w]
-        final_stamps = None
-    n_det = len(final_detections)
-    # clust_stamps = clust_stamps[w]
-    logger.info(f'Number of candidates {n_det}')
-    # remove these memory cleanups as they aren't needed at this point
-    # del im_datas, inv_vars, c, cv, kernel
-    # gc.collect()
-    # torch.cuda.empty_cache()
+        
+    logger.info(f'Number of candidates {len(final_detections)}')
 
     # columns to add to the plant table to track matched detections
-    detection_types = {'det_shift': detections,
-                       'det_filt': filt_detections,
-                       'det_gird': clust_detections,
-                       'det_final': final_detections}
+    # Values are row indices into the master ``detections`` table.
+    detection_types = {'det_shift': detections_idx,
+                       'det_filt': filt_detections_idx,
+                       'det_gird': clust_master_idx,
+                       'det_final': final_detection_indices}
     plants, detection_matches = summarize_plant_matches(
         plants=plants,
         detection_types=detection_types,
+        detections=detections,
         rates=rates,
         dist_max=dist_max,
         dist_rate_max=dist_rate_max)
@@ -477,19 +496,23 @@ def run(stack_inputs: dict, stack_params: dict,
     logger.info("Wrote plant/detection join table to: %s",
                  detection_matches_filename)
 
-    args = np.argsort(final_detections[:, 5])[::-1]
-    final_detections = final_detections[args]
-    if final_stamps is not None:
-        final_stamps = final_stamps[args]
+    order = np.argsort(detections[final_detection_indices, 5])[::-1]
+    final_detection_indices = final_detection_indices[order]
+    final_stamps = final_stamps[order]
 
     logger.info(f"Saving to: {results_filename}")
     with open(results_filename, 'w') as han:
-        for i in range(len(final_detections)):
-            rx = rates[round(final_detections[i, 2]), 0]
-            ry = rates[round(final_detections[i, 2]), 1]
-            (x, y, f, snr) = (final_detections[i, 0],
-                              final_detections[i, 1],
-                              final_detections[i, 4],
-                              final_detections[i, 5])
+        for i in range(len(final_detection_indices)):
+            rx = rates[round(detections[final_detection_indices[i], 2]), 0]
+            ry = rates[round(detections[final_detection_indices[i], 2]), 1]
+            (x, y, f, snr) = (detections[final_detection_indices[i], 0],
+                              detections[final_detection_indices[i], 1],
+                              detections[final_detection_indices[i], 4],
+                              detections[final_detection_indices[i], 5])
             row = f'snr: {snr} flux: {f} x: {x} y: {y} x_v: {rx} y_v: {ry}\n'
             han.write(row)
+
+    stamps_filename = results_filename.rsplit('.', 1)[0] + '_stamps.npy'
+    logger.info("Writing stamps to: %s. Detections are in order as specified in %s", stamps_filename, results_filename)
+    np.save(stamps_filename, final_stamps)
+    logger.info("Wrote stamps to: %s", stamps_filename)

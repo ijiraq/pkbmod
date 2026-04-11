@@ -151,7 +151,7 @@ def main():
             Path for inputs and outputs are logically given by .......\n
             warps: BASE_DIR/COLLECTIONS/DAY_OBS/CHIP ........... \n
             properties: BASE_DIR/COLLECTIONS/DAY_OBS/CHIP ........... \n
-            results: BASE_DIR/{APP_NAME}/DAY_OBS/CHIP/results.txt ........... \n
+            results: BASE_DIR/{APP_NAME}/DAY_OBS/CHIP/sns_DAY_OBS_cCHIP_detections.txt ........... \n
             inputs: BASE_DIR/{APP_NAME}/DAY_OBS/CHIP/params.json ........... \n
             log: BASE_DIR/{APP_NAME}/DAY_OBS/CHIP/log.txt files to ........
             """),
@@ -215,6 +215,7 @@ def main():
                      f"{data_model_args['day_obs']}",
                      f"results_{data_model_args['chip']}"])
        os.makedirs(output_path, exist_ok=True)
+       results_basename = f"sns_{args.day_obs}_c{args.chip}_detections.txt"
 
     if args.mode == 'butler':
         from butler_data_model import ButlerDataModel as DataModel
@@ -236,18 +237,20 @@ def main():
                                 f"{data_model_args['tract']}",
                                 f"{data_model_args['patch']}"])
         os.makedirs(output_path, exist_ok=True)
-
+        results_basename = (
+            f"sns_{args.day_obs}_{args.band}_{args.tract}_{args.patch}_detections.txt"
+        )
 
     logfilname = f"{output_path}/log.txt"
     configure_cli_logging(args.log_level, logfilname, no_tty=args.no_tty)
     logger.debug("Args: %r", args)
     params_filename = f"{output_path}/params.json"
-    results_filename = f"{output_path}/results_.txt"
+    results_filename = f"{output_path}/{results_basename}"
     plants_match_filename = f"{output_path}/plant_matches.txt"
+    results_filename = f"{output_path}/{results_basename}"
     logger.info("Saving parameters to %s", params_filename)
     logger.info("Saving results to %s", results_filename)
     logger.info("Saving matched plants to %s", plants_match_filename)
-
 
     # Stacking Parameters
     stack_params = StackParams(params_filename)
@@ -266,7 +269,6 @@ def main():
     stack_params.save()
 
     # common arguments used by DataModel class builders
-
 
     logger.info("Saving log to %s", logfilname)
 
