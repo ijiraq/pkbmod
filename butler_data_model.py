@@ -187,7 +187,7 @@ class ButlerDataModel:
     def plants(self) -> Table:
         """Injection truth table for :mod:`stack` / ``sns_data_nh``.
 
-        Columns include ``plant_id``, ``x0``, ``y0`` (reference pixels),
+        Columns include ``plant_id``, ``ra``, ``dec``, ``x0``, ``y0`` (reference pixels),
         ``mag``, and ``rate_x``, ``rate_y``. The rate columns are average
         motion in **pixels per day**, consistent with ``dmjds`` (day offsets)
         and :func:`sns_data_nh.get_shift_rates`.
@@ -267,8 +267,8 @@ class ButlerDataModel:
         (``dmjds`` in days × rate in pixels/day).
 
         Returns:
-            astropy.table.Table: ``plant_id``, ``x0``, ``y0``, ``rate_x``,
-            ``rate_y``, ``mag`` with rates in pixels/day.
+            astropy.table.Table: ``plant_id``, ``ra``, ``dec``, ``x0``, ``y0``,
+            ``rate_x``, ``rate_y``, ``mag`` (``ra``/``dec`` from the initial epoch).
         """
         data_id = {'initial': self.refs[0].dataId,
                    'final': self.refs[-1].dataId}
@@ -300,12 +300,23 @@ class ButlerDataModel:
         cat['rate_x'] = (cat['X0_2']-cat['X0_1'])/dt
         cat['rate_y'] = (cat['Y0_2']-cat['Y0_1'])/dt
         logger.debug(f"Full injected source catalog:\n{cat}")
-        cat = cat['injection_id', 'X0_1','Y0_1','rate_x', 'rate_y', 'mag_1']
+        cat = cat[
+            'injection_id',
+            'X0_1',
+            'Y0_1',
+            'ra_1',
+            'dec_1',
+            'rate_x',
+            'rate_y',
+            'mag_1',
+        ]
         cat['injection_id'].name = 'plant_id'
         cat['X0_1'].name = 'x0'
         cat['Y0_1'].name = 'y0'
+        cat['ra_1'].name = 'ra'
+        cat['dec_1'].name = 'dec'
         cat['mag_1'].name = 'mag'
-        return cat['plant_id','x0','y0', 'rate_x', 'rate_y', 'mag']
+        return cat['plant_id', 'ra', 'dec', 'x0','y0', 'rate_x', 'rate_y', 'mag']
 
     def _load_from_butler(self) -> dict[str, Any]:
         """Load the data from the butler and return a dictionary of arrays for stacking."""

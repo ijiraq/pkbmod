@@ -39,6 +39,8 @@ def match_detections_to_plants(plants: Table,
         'dist_r': [],
         'dist_v': [],
         'plant_id': [],
+        'plant_ra': [],
+        'plant_dec': [],
         'plant_x0': [],
         'plant_y0': [],
         'plant_rate_x': [],
@@ -74,6 +76,8 @@ def match_detections_to_plants(plants: Table,
             columns['dist_r'].append(float(np.sqrt(dist_sq[detection_index])))
             columns['dist_v'].append(
                 float(np.sqrt(dist_rate_sq[detection_index])))
+            columns['plant_ra'].append(float(plants['ra'][idx]))
+            columns['plant_dec'].append(float(plants['dec'][idx]))
             columns['plant_x0'].append(float(plants['x0'][idx]))
             columns['plant_y0'].append(float(plants['y0'][idx]))
             columns['plant_rate_x'].append(float(plants['rate_x'][idx]))
@@ -143,6 +147,8 @@ def summarize_plant_matches(plants: Table,
             'detection_type': [],
             'dist_r': [],
             'dist_v': [],
+            'plant_ra': [],
+            'plant_dec': [],
             'plant_x0': [],
             'plant_y0': [],
             'plant_rate_x': [],
