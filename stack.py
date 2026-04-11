@@ -8,6 +8,7 @@ import torch
 
 import sns_data_nh as data
 import sns_utils as utils
+from detection_frame import detection_xy_to_radec_deg, write_detection_frame_sidecar
 
 logger = logging.getLogger(__name__)
 
@@ -199,6 +200,7 @@ def run(stack_inputs: dict, stack_params: dict,
     plants = stack_inputs['plants']
     results_filename = results_filename
     bitmask = stack_inputs['bitmask']
+    detection_frame = stack_inputs.get('detection_frame')
 
     # now define the parameters based on stackparams dictionary.
     badflags = stack_params['badflags']
@@ -500,16 +502,27 @@ def run(stack_inputs: dict, stack_params: dict,
     final_detection_indices = final_detection_indices[order]
     final_stamps = final_stamps[order]
 
+    if detection_frame is not None:
+        frame_sidecar = results_filename.rsplit('.', 1)[0] + '_detection_frame.json'
+        write_detection_frame_sidecar(frame_sidecar, detection_frame)
+
     logger.info(f"Saving to: {results_filename}")
     with open(results_filename, 'w') as han:
         for i in range(len(final_detection_indices)):
-            rx = rates[round(detections[final_detection_indices[i], 2]), 0]
-            ry = rates[round(detections[final_detection_indices[i], 2]), 1]
-            (x, y, f, snr) = (detections[final_detection_indices[i], 0],
-                              detections[final_detection_indices[i], 1],
-                              detections[final_detection_indices[i], 4],
-                              detections[final_detection_indices[i], 5])
-            row = f'snr: {snr} flux: {f} x: {x} y: {y} x_v: {rx} y_v: {ry}\n'
+            ix = final_detection_indices[i]
+            rx = rates[round(detections[ix, 2]), 0]
+            ry = rates[round(detections[ix, 2]), 1]
+            (x, y, f, snr) = (detections[ix, 0],
+                              detections[ix, 1],
+                              detections[ix, 4],
+                              detections[ix, 5])
+            ra_deg, dec_deg = detection_xy_to_radec_deg(detection_frame, float(x), float(y))
+            row = (
+                f'snr: {snr} flux: {f} x: {x} y: {y} x_v: {rx} y_v: {ry}'
+            )
+            if ra_deg is not None and dec_deg is not None:
+                row += f' ra_deg: {ra_deg} dec_deg: {dec_deg}'
+            row += '\n'
             han.write(row)
 
     stamps_filename = results_filename.rsplit('.', 1)[0] + '_stamps.npy'

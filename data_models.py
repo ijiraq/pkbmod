@@ -123,6 +123,13 @@ class ExtractedDataModel(object):
             logger.debug((f"{im_nums[idx]} {dmjds[idx]} {nan_med_variance}"))
             if np.isnan(nan_med_variance):
                 logger.debug('Skipping image {im_nums[idx]} due to nans.')
+                if idx == 0:
+                    logger.warning(
+                        "Removing the first stacked image (visit %s); "
+                        "detection_frame WCS still refers to the original "
+                        "reference warp — sky coordinates may be inconsistent.",
+                        im_nums[idx],
+                    )
                 for key in self.stack_inputs:
                     _ = self._stack_inputs[key].pop(idx)
             else:
@@ -175,6 +182,8 @@ class ExtractedDataModel(object):
             psfs.append(psf_data/np.sum(psf_data))
             im_nums.append(im_num)
         logger.debug(f"Using {len(datas)} images.")
+        ref_hdr = self.ref_header.copy() if hasattr(self.ref_header, "copy") else self.ref_header
+        wcs_astropy = WCS(ref_hdr)
         self._stack_inputs = {
             'datas': datas,
             'masks': masks,
@@ -184,7 +193,15 @@ class ExtractedDataModel(object):
             'fwhms': fwhms,
             'im_nums': im_nums,
             'plants': self.plants,
-            'bitmask': self.bitmask}
+            'bitmask': self.bitmask,
+            'detection_frame': {
+                'source': 'fits_warp',
+                'reference_visit': int(self.ref_visit),
+                'parent_origin_xy': (0.0, 0.0),
+                'wcs_astropy': wcs_astropy,
+                'fits_header_text': str(ref_hdr),
+            },
+        }
         return self.stack_inputs
 
     @property

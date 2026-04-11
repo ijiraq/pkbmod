@@ -21,6 +21,9 @@ import logging
 import numpy as np
 from typing import Any, Mapping, Sequence
 
+from astropy.io import fits
+from astropy.wcs import WCS as AstropyWCS
+
 logger = logging.getLogger(__name__)
 
 
@@ -70,6 +73,51 @@ def _exposure_to_arrays(exposure, dtype: np.dtype):
     variance = np.asarray(mi.variance.array, dtype=dtype)
     mask = np.asarray(mi.mask.array, dtype=np.uint32)
     return data, variance, mask
+
+
+def _skywcs_metadata_to_astropy_wcs(md: Any) -> "AstropyWCS | None":
+    """Best-effort FITS header from LSST ``getFitsMetadata()`` for Astropy."""
+    try:
+        hdr = fits.Header()
+        try:
+            names = list(md.names())
+        except Exception:
+            names = list(md.paramNames(False))  # type: ignore[attr-defined]
+        for name in names:
+            hdr[name] = md.get(name)
+        return AstropyWCS(hdr)
+    except Exception as exc:
+        logger.warning("Could not build Astropy WCS from LSST metadata: %s", exc)
+        return None
+
+
+def _detection_frame_from_exposure(
+    exposure: Any, reference_data_id: Mapping[str, Any], dataset_type: str
+) -> dict[str, Any]:
+    """Frame for converting numpy detection x/y to sky (matches plant pixel convention)."""
+    skywcs = exposure.getWcs()
+    x0 = float(exposure.getX0())
+    y0 = float(exposure.getY0())
+    md = skywcs.getFitsMetadata(precise=False)
+    awcs = _skywcs_metadata_to_astropy_wcs(md)
+    ref = {str(k): _json_safe_data_id(v) for k, v in reference_data_id.items()}
+    out: dict[str, Any] = {
+        "source": "lsst_butler",
+        "dataset_type": dataset_type,
+        "reference_data_id": ref,
+        "parent_origin_xy": (x0, y0),
+        "lsst_sky_wcs": skywcs,
+        "wcs_astropy": awcs,
+    }
+    if awcs is not None:
+        out["fits_header_text"] = str(awcs.to_header())
+    return out
+
+
+def _json_safe_data_id(v: Any) -> Any:
+    if isinstance(v, (str, int, float, bool)) or v is None:
+        return v
+    return str(v)
 
 
 def _visit_mjd_mid(exposure, DateTime) -> float:
@@ -272,8 +320,13 @@ class ButlerDataModel:
 
         mjd0: float | None = None
         logger.info(f"Loading {len(refs)} datasets from {self.butler}")
+        detection_frame: dict[str, Any] | None = None
         for ref in refs:
             exposure = self.butler.get(ref)
+            if detection_frame is None:
+                detection_frame = _detection_frame_from_exposure(
+                    exposure, ref.dataId.required, self.dataset_type
+                )
             data, variance, mask = _exposure_to_arrays(exposure, self.data_dtype)
             # get bitmask from exposure mask plane of first exposure
             if self._bitmask is None:
@@ -311,6 +364,7 @@ class ButlerDataModel:
             "im_nums": im_nums,
             "plants": self.plants,
             "bitmask": self.bitmask,
+            "detection_frame": detection_frame,
         }
 
     @property
@@ -364,6 +418,13 @@ class ButlerDataModel:
             logger.debug("%s %s %s", im_nums[idx], dmjds[idx], nan_med_variance)
             if np.isnan(nan_med_variance):
                 logger.debug("Skipping image %s due to nans.", im_nums[idx])
+                if idx == 0:
+                    logger.warning(
+                        "Removing the first stacked image (visit %s); "
+                        "detection_frame WCS still refers to the original "
+                        "reference warp — sky coordinates may be inconsistent.",
+                        im_nums[idx],
+                    )
                 for key in per_visit_keys:
                     self._stack_inputs[key].pop(idx)
             else:
