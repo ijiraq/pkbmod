@@ -1,12 +1,21 @@
 from argparse import ArgumentParser, ArgumentDefaultsHelpFormatter
+from collections import deque
+import gc
 import logging
 import numpy as np
 import os
 import sys
 import textwrap
+import time
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from data_models import StackParams
 from data_models import read_flag_list_from_file
 import stack
+
+try:
+    import psutil
+except ImportError:
+    psutil = None
 
 APP_NAME = 'pkbmod'
 EXTENSION_WITH_WCS = 1
@@ -46,6 +55,192 @@ def configure_cli_logging(level_name: str, filename: str, *, no_tty: bool = Fals
         sh.setLevel(stream_level)
         sh.setFormatter(stream_formatter)
         root.addHandler(sh)
+
+
+def _memory_percent() -> float:
+    """RSS-based system memory use percent, or 0 if unknown."""
+    if psutil is None:
+        return 0.0
+    return float(psutil.virtual_memory().percent)
+
+
+def _apply_stack_params_from_args(stack_params: StackParams, args) -> None:
+    stack_params.use_negative_well = not args.dontUseNegativeWell
+    stack_params.min_snr = args.min_snr
+    stack_params.rate_fwhm_grid_step = args.rate_fwhm_grid_step
+    stack_params.n_keep = args.n_keep
+    stack_params.dist_lim = args.clust_dist_lim
+    stack_params.min_samp = args.clust_min_samp
+    stack_params.trim_snr = args.trim_snr
+    stack_params.dist_lim_x = 4
+    stack_params.dist_lim_y = 6
+    stack_params.peak_offset_max = args.peak_offset_max
+    stack_params.variance_trim = args.variance_trim
+    stack_params.badflags = args.badflags
+
+
+def _load_and_pack_butler_patch(
+    *,
+    day_obs: int,
+    collections: str,
+    dataset_type: str,
+    butler: str,
+    skymap: str,
+    tract: int,
+    patch: int,
+    band: str,
+    instrument: str,
+    psf_dataset_type: str,
+    data_dtype: np.dtype,
+    variance_trim: float,
+) -> tuple[dict, str, str, str]:
+    """Blocking I/O + CPU prep in a worker thread. Returns stack_inputs and output paths."""
+    from butler_data_model import ButlerDataModel
+
+    output_path = "/".join(
+        [butler, collections, APP_NAME, str(day_obs), str(tract), str(patch)]
+    )
+    os.makedirs(output_path, exist_ok=True)
+    results_basename = f"sns_{day_obs}_{band}_{tract}_{patch}_detections.txt"
+    results_filename = f"{output_path}/{results_basename}"
+    plants_match_filename = f"{output_path}/plant_matches.txt"
+    params_filename = f"{output_path}/params.json"
+
+    dm = ButlerDataModel(
+        butler=butler,
+        collections=collections,
+        day_obs=day_obs,
+        skymap=skymap,
+        tract=tract,
+        patch=patch,
+        band=band,
+        instrument=instrument,
+        dataset_type=dataset_type,
+        data_dtype=data_dtype,
+        psf_dataset_type=psf_dataset_type,
+    )
+    dm.mask_variance(variance_trim)
+    dm.pack_inputs()
+    stack_inputs = dm.stack_inputs
+    del dm
+    gc.collect()
+    return stack_inputs, results_filename, plants_match_filename, params_filename
+
+
+def run_butler_patches_pipeline(args, badflags: list[str], run_dtype: type) -> None:
+    """Load patches in parallel (thread pool) with RAM back-pressure; stack.run sequentially."""
+    patches = list(args.patches)
+    max_ram = float(args.max_ram_percent)
+    max_parallel = max(1, int(args.max_parallel_loads))
+    if psutil is None:
+        logger.warning(
+            "psutil not installed — memory limit ignored; "
+            "install psutil for --max-ram-percent. Using max_parallel_loads=1."
+        )
+        max_parallel = 1
+
+    data_dtype = np.float16 if run_dtype == np.float16 else np.float32
+
+    def mem_allows_new_load(futures: dict) -> bool:
+        if len(futures) >= max_parallel:
+            return False
+        if psutil is None:
+            return True
+        return _memory_percent() < max_ram
+
+    def submit_if_possible(ex: ThreadPoolExecutor, pending: deque, futures: dict) -> None:
+        while pending and mem_allows_new_load(futures):
+            patch = pending.popleft()
+            fut = ex.submit(
+                _load_and_pack_butler_patch,
+                day_obs=args.day_obs,
+                collections=args.collections,
+                dataset_type=args.dataset_type,
+                butler=args.butler,
+                skymap=args.skymap,
+                tract=args.tract,
+                patch=patch,
+                band=args.band,
+                instrument=args.instrument,
+                psf_dataset_type=args.psf_dataset_type,
+                data_dtype=data_dtype,
+                variance_trim=args.variance_trim,
+            )
+            futures[fut] = patch
+            logger.info(
+                "Submitted background load for patch %s (RAM ~%.1f%%)",
+                patch,
+                _memory_percent(),
+            )
+
+    pending = deque(patches)
+    futures = {}
+
+    with ThreadPoolExecutor(max_workers=max_parallel) as ex:
+        submit_if_possible(ex, pending, futures)
+
+        while pending or futures:
+            if not futures:
+                if not pending:
+                    break
+                if psutil is not None and _memory_percent() >= max_ram:
+                    logger.info(
+                        "Pausing new loads until RAM < %.1f%% (now %.1f%%)",
+                        max_ram,
+                        _memory_percent(),
+                    )
+                    time.sleep(0.4)
+                    continue
+                submit_if_possible(ex, pending, futures)
+                if not futures and pending:
+                    # Still could not submit (e.g. at parallel cap); wait briefly
+                    time.sleep(0.1)
+                continue
+
+            done, _ = wait(futures.keys(), timeout=2.0, return_when=FIRST_COMPLETED)
+            if not done:
+                submit_if_possible(ex, pending, futures)
+                continue
+
+            for fut in done:
+                patch = futures.pop(fut)
+                try:
+                    stack_inputs, results_filename, plants_match_filename, params_filename = (
+                        fut.result()
+                    )
+                except Exception:
+                    logger.exception("Load failed for patch %s", patch)
+                    continue
+
+                stack_params = StackParams(params_filename)
+                _apply_stack_params_from_args(stack_params, args)
+                stack_params.save()
+
+                logger.info(
+                    "Running stack for patch %s (RAM ~%.1f%%)",
+                    patch,
+                    _memory_percent(),
+                )
+                try:
+                    stack.run(
+                        stack_inputs=stack_inputs,
+                        stack_params=dict(stack_params),
+                        results_filename=results_filename,
+                        plant_matches_filename=plants_match_filename,
+                        low_mem=args.low_mem,
+                        low_mem_tile_w=args.low_mem_tile_w,
+                        dtype=run_dtype,
+                    )
+                finally:
+                    del stack_inputs
+                    gc.collect()
+                    logger.info(
+                        "Finished patch %s; RAM ~%.1f%%",
+                        patch,
+                        _memory_percent(),
+                    )
+
+            submit_if_possible(ex, pending, futures)
 
 
 def main():
@@ -126,7 +321,24 @@ def main():
         choices=[16, 32],
         default=32,
         help="Floating-point precision for CLI workflow arrays/tensors.")
-
+    parser.add_argument(
+        '--max-ram-percent',
+        type=float,
+        default=70.0,
+        help=(
+            "Butler mode (multi-patch): do not start a new parallel load while "
+            "system RAM use is at or above this fraction (requires psutil)."
+        ),
+    )
+    parser.add_argument(
+        '--max-parallel-loads',
+        type=int,
+        default=2,
+        help=(
+            "Butler mode: maximum concurrent ButlerDataModel loads (I/O threads). "
+            "stack.run still runs one at a time on the main thread."
+        ),
+    )
 
     sp = parser.add_subparsers(dest='mode')
 
@@ -174,19 +386,19 @@ def main():
     btargs.add_argument('day_obs', type=int, help='day_obs')
     btargs.add_argument('skymap', type=str, help='skymap name')
     btargs.add_argument('tract', type=int, help='Tract')
-    btargs.add_argument('patch', type=int, help='Patch')
+    btargs.add_argument('patches', type=int, nargs='+', help='Patch id(s), one or more')
     btargs.add_argument('--collections',
                         type=str,
                         help="name of collection/sub-dir with warps to stack")
     btargs.add_argument('--dataset-type', type=str,
                         help="dataset type of difference images to stack")
-    btargs.set_defaults(collections="u/NH/coadd", 
+    btargs.set_defaults(collections="u/NH/coadd",
                         dataset_type="injected_diff_directWarp")
     btargs.add_argument('--band', type=str, help='Band', default='gri')
     btargs.add_argument('--instrument', type=str, help='Instrument', default='HSC')
     btargs.add_argument('--psf-dataset-type', type=str, help='What dataset to get PSF from',
                         default='injected_calexp')
-    
+
     args = parser.parse_args()
 
     # what level of floating point to use (float16 to lower memory footprint)
@@ -198,91 +410,84 @@ def main():
     else:
         badflags = args.flagkeys.split(",")
 
+    args.badflags = badflags
 
     # add mode specific args and set the model
     if args.mode == 'filesystem':
-       from data_models import ExtractedDataModel as DataModel
-       data_model_args = {'day_obs': args.day_obs,
-                          'collections': args.collections,
-                          'dataset_type': args.dataset_type,
-                          'bitmask_filename': args.bitmask_filename,
-                          'data_dtype': run_dtype,
-                          'chip': args.chip,
-                          'base_dir':  args.base_dir,
-                          }
-       output_path = "/".join([f"{data_model_args['base_dir']}",
-                     f"{APP_NAME}",
-                     f"{data_model_args['day_obs']}",
-                     f"results_{data_model_args['chip']}"])
-       os.makedirs(output_path, exist_ok=True)
-       results_basename = f"sns_{args.day_obs}_c{args.chip}_detections.txt"
-
-    if args.mode == 'butler':
-        from butler_data_model import ButlerDataModel as DataModel
+        from data_models import ExtractedDataModel as DataModel
         data_model_args = {'day_obs': args.day_obs,
                            'collections': args.collections,
                            'dataset_type': args.dataset_type,
-                           'butler': args.butler,
-                           'skymap': args.skymap,
-                           'tract': args.tract,
-                           'patch': args.patch,
-                           'band': args.band,
-                           'instrument':  args.instrument,
-                           'psf_dataset_type': args.psf_dataset_type,
+                           'bitmask_filename': args.bitmask_filename,
+                           'data_dtype': run_dtype,
+                           'chip': args.chip,
+                           'base_dir': args.base_dir,
                            }
-        output_path = "/".join([f"{data_model_args['butler']}",
-                                f"{data_model_args['collections']}",
+        output_path = "/".join([f"{data_model_args['base_dir']}",
                                 f"{APP_NAME}",
                                 f"{data_model_args['day_obs']}",
-                                f"{data_model_args['tract']}",
-                                f"{data_model_args['patch']}"])
+                                f"results_{data_model_args['chip']}"])
         os.makedirs(output_path, exist_ok=True)
-        results_basename = (
-            f"sns_{args.day_obs}_{args.band}_{args.tract}_{args.patch}_detections.txt"
+        results_basename = f"sns_{args.day_obs}_c{args.chip}_detections.txt"
+
+        logfilname = f"{output_path}/log.txt"
+        configure_cli_logging(args.log_level, logfilname, no_tty=args.no_tty)
+        logger.debug("Args: %r", args)
+        params_filename = f"{output_path}/params.json"
+        results_filename = f"{output_path}/{results_basename}"
+        plants_match_filename = f"{output_path}/plant_matches.txt"
+        logger.info("Saving parameters to %s", params_filename)
+        logger.info("Saving results to %s", results_filename)
+        logger.info("Saving matched plants to %s", plants_match_filename)
+
+        stack_params = StackParams(params_filename)
+        _apply_stack_params_from_args(stack_params, args)
+        stack_params.badflags = badflags
+        stack_params.save()
+
+        logger.info("Saving log to %s", logfilname)
+
+        data_model = DataModel(**data_model_args)
+        data_model.mask_variance(stack_params.variance_trim)
+        data_model.pack_inputs()
+
+        stack.run(stack_inputs=data_model.stack_inputs,
+                  stack_params=dict(stack_params),
+                  results_filename=results_filename,
+                  plant_matches_filename=plants_match_filename,
+                  low_mem=args.low_mem,
+                  low_mem_tile_w=args.low_mem_tile_w,
+                  dtype=run_dtype)
+        return
+
+    if args.mode == 'butler':
+        # Log to first patch output dir (each patch also logs via root logger 
+        # to same file if same handler — we reconfigure once)
+        first_patch = args.patches[0]
+        output_path = "/".join([
+            args.butler,
+            args.collections,
+            APP_NAME,
+            str(args.day_obs),
+            str(args.tract),
+            str(first_patch),
+        ])
+        os.makedirs(output_path, exist_ok=True)
+        logfilname = f"{output_path}/log.txt"
+        configure_cli_logging(args.log_level, logfilname, no_tty=args.no_tty)
+        logger.debug("Args: %r", args)
+        logger.info(
+            "Butler pipeline: %d patch(es) %s; max_parallel_loads=%s max_ram_percent=%s",
+            len(args.patches),
+            list(args.patches),
+            args.max_parallel_loads,
+            args.max_ram_percent if psutil else "n/a",
         )
 
-    logfilname = f"{output_path}/log.txt"
-    configure_cli_logging(args.log_level, logfilname, no_tty=args.no_tty)
-    logger.debug("Args: %r", args)
-    params_filename = f"{output_path}/params.json"
-    results_filename = f"{output_path}/{results_basename}"
-    plants_match_filename = f"{output_path}/plant_matches.txt"
-    results_filename = f"{output_path}/{results_basename}"
-    logger.info("Saving parameters to %s", params_filename)
-    logger.info("Saving results to %s", results_filename)
-    logger.info("Saving matched plants to %s", plants_match_filename)
+        run_butler_patches_pipeline(args, badflags, run_dtype)
+        return
 
-    # Stacking Parameters
-    stack_params = StackParams(params_filename)
-    stack_params.use_negative_well = not args.dontUseNegativeWell
-    stack_params.min_snr = args.min_snr
-    stack_params.rate_fwhm_grid_step = args.rate_fwhm_grid_step
-    stack_params.n_keep = args.n_keep
-    stack_params.dist_lim = args.clust_dist_lim
-    stack_params.min_samp = args.clust_min_samp
-    stack_params.trim_snr = args.trim_snr
-    stack_params.dist_lim_x = 4
-    stack_params.dist_lim_y = 6
-    stack_params.peak_offset_max = args.peak_offset_max
-    stack_params.variance_trim = args.variance_trim
-    stack_params.badflags = badflags
-    stack_params.save()
-
-    # common arguments used by DataModel class builders
-
-    logger.info("Saving log to %s", logfilname)
-
-    data_model = DataModel(**data_model_args)
-    data_model.mask_variance(stack_params.variance_trim)
-    data_model.pack_inputs()
-
-    stack.run(stack_inputs=data_model.stack_inputs,
-              stack_params=dict(stack_params),
-              results_filename=results_filename,
-              plant_matches_filename=plants_match_filename,
-              low_mem=args.low_mem,
-              low_mem_tile_w=args.low_mem_tile_w,
-              dtype=run_dtype)
+    parser.error("Choose a mode: filesystem or butler")
 
 
 if __name__ == '__main__':
