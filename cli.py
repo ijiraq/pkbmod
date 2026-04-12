@@ -10,6 +10,7 @@ import time
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from data_models import StackParams
 from data_models import read_flag_list_from_file
+from load_budget import LoadMemoryBudget, stack_inputs_array_nbytes
 import stack
 
 try:
@@ -57,13 +58,6 @@ def configure_cli_logging(level_name: str, filename: str, *, no_tty: bool = Fals
         root.addHandler(sh)
 
 
-def _memory_percent() -> float:
-    """RSS-based system memory use percent, or 0 if unknown."""
-    if psutil is None:
-        return 0.0
-    return float(psutil.virtual_memory().percent)
-
-
 def _apply_stack_params_from_args(stack_params: StackParams, args) -> None:
     stack_params.use_negative_well = not args.dontUseNegativeWell
     stack_params.min_snr = args.min_snr
@@ -93,8 +87,8 @@ def _load_and_pack_butler_patch(
     psf_dataset_type: str,
     data_dtype: np.dtype,
     variance_trim: float,
-) -> tuple[dict, str, str, str]:
-    """Blocking I/O + CPU prep in a worker thread. Returns stack_inputs and output paths."""
+) -> tuple[dict, str, str, str, int, int]:
+    """Blocking I/O + CPU prep in a worker thread. Returns stack_inputs, paths, ref count, nbytes."""
     from butler_data_model import ButlerDataModel
 
     output_path = "/".join(
@@ -121,36 +115,73 @@ def _load_and_pack_butler_patch(
     )
     dm.mask_variance(variance_trim)
     dm.pack_inputs()
+    n_refs = len(dm.refs)
     stack_inputs = dm.stack_inputs
+    nbytes = stack_inputs_array_nbytes(stack_inputs)
     del dm
     gc.collect()
-    return stack_inputs, results_filename, plants_match_filename, params_filename
+    return stack_inputs, results_filename, plants_match_filename, params_filename, n_refs, nbytes
 
 
 def run_butler_patches_pipeline(args, badflags: list[str], run_dtype: type) -> None:
     """Load patches in parallel (thread pool) with RAM back-pressure; stack.run sequentially."""
+    from lsst.daf.butler import Butler
+
+    from butler_data_model import count_datasets_for_patch
+
     patches = list(args.patches)
     max_ram = float(args.max_ram_percent)
     max_parallel = max(1, int(args.max_parallel_loads))
     if psutil is None:
         logger.warning(
-            "psutil not installed — memory limit ignored; "
-            "install psutil for --max-ram-percent. Using max_parallel_loads=1."
+            "psutil not installed — RSS gate disabled; "
+            "reservation vs --container-ram-gib still applies. "
+            "Install psutil for full --max-ram-percent behavior."
         )
-        max_parallel = 1
 
     data_dtype = np.float16 if run_dtype == np.float16 else np.float32
 
-    def mem_allows_new_load(futures: dict) -> bool:
-        if len(futures) >= max_parallel:
-            return False
-        if psutil is None:
-            return True
-        return _memory_percent() < max_ram
+    container_bytes = int(float(args.container_ram_gib) * (1024**3))
+    bytes_per_exposure = float(args.bytes_per_exposure_mib) * (1024**2)
+    budget = LoadMemoryBudget(
+        container_cap_bytes=container_bytes,
+        max_ram_fraction=max_ram / 100.0,
+        bytes_per_exposure=bytes_per_exposure,
+        ema_alpha=float(args.budget_ema),
+    )
+
+    shared_butler = Butler(args.butler, collections=args.collections)
 
     def submit_if_possible(ex: ThreadPoolExecutor, pending: deque, futures: dict) -> None:
-        while pending and mem_allows_new_load(futures):
-            patch = pending.popleft()
+        while pending:
+            patch = pending[0]
+            try:
+                n_refs = count_datasets_for_patch(
+                    shared_butler,
+                    collections=args.collections,
+                    dataset_type=args.dataset_type,
+                    instrument=args.instrument,
+                    day_obs=args.day_obs,
+                    skymap=args.skymap,
+                    tract=args.tract,
+                    patch=patch,
+                    band=args.band,
+                )
+            except Exception:
+                logger.exception("Ref query failed for patch %s", patch)
+                pending.popleft()
+                continue
+
+            estimate = budget.estimate_patch_bytes(n_refs)
+            if not budget.can_start_load(
+                estimate,
+                n_running_loads=len(futures),
+                max_parallel=max_parallel,
+            ):
+                return
+
+            pending.popleft()
+            budget.reserve(estimate)
             fut = ex.submit(
                 _load_and_pack_butler_patch,
                 day_obs=args.day_obs,
@@ -166,11 +197,16 @@ def run_butler_patches_pipeline(args, badflags: list[str], run_dtype: type) -> N
                 data_dtype=data_dtype,
                 variance_trim=args.variance_trim,
             )
-            futures[fut] = patch
+            futures[fut] = (patch, estimate)
             logger.info(
-                "Submitted background load for patch %s (RAM ~%.1f%%)",
+                "Submitted background load for patch %s (n_refs=%d, est ~%.2f GiB, RAM ~%.1f%%, "
+                "reserved ~%.2f GiB, bytes/ref ~%.1f MiB)",
                 patch,
-                _memory_percent(),
+                n_refs,
+                estimate / (1024**3),
+                budget.memory_percent(),
+                budget.reserved_bytes / (1024**3),
+                budget.bytes_per_exposure / (1024**2),
             )
 
     pending = deque(patches)
@@ -183,17 +219,17 @@ def run_butler_patches_pipeline(args, badflags: list[str], run_dtype: type) -> N
             if not futures:
                 if not pending:
                     break
-                if psutil is not None and _memory_percent() >= max_ram:
+                if psutil is not None and budget.memory_percent() >= max_ram:
                     logger.info(
                         "Pausing new loads until RAM < %.1f%% (now %.1f%%)",
                         max_ram,
-                        _memory_percent(),
+                        budget.memory_percent(),
                     )
                     time.sleep(0.4)
                     continue
                 submit_if_possible(ex, pending, futures)
                 if not futures and pending:
-                    # Still could not submit (e.g. at parallel cap); wait briefly
+                    # Still could not submit (e.g. at parallel cap or reservation full); wait briefly
                     time.sleep(0.1)
                 continue
 
@@ -203,14 +239,23 @@ def run_butler_patches_pipeline(args, badflags: list[str], run_dtype: type) -> N
                 continue
 
             for fut in done:
-                patch = futures.pop(fut)
+                patch, reserved_estimate = futures.pop(fut)
                 try:
-                    stack_inputs, results_filename, plants_match_filename, params_filename = (
-                        fut.result()
-                    )
+                    (
+                        stack_inputs,
+                        results_filename,
+                        plants_match_filename,
+                        params_filename,
+                        n_refs,
+                        array_nbytes,
+                    ) = fut.result()
                 except Exception:
+                    budget.release(reserved_estimate)
                     logger.exception("Load failed for patch %s", patch)
                     continue
+
+                budget.release(reserved_estimate)
+                budget.observe_completed_load(n_refs, array_nbytes)
 
                 stack_params = StackParams(params_filename)
                 _apply_stack_params_from_args(stack_params, args)
@@ -219,7 +264,7 @@ def run_butler_patches_pipeline(args, badflags: list[str], run_dtype: type) -> N
                 logger.info(
                     "Running stack for patch %s (RAM ~%.1f%%)",
                     patch,
-                    _memory_percent(),
+                    budget.memory_percent(),
                 )
                 try:
                     stack.run(
@@ -237,7 +282,7 @@ def run_butler_patches_pipeline(args, badflags: list[str], run_dtype: type) -> N
                     logger.info(
                         "Finished patch %s; RAM ~%.1f%%",
                         patch,
-                        _memory_percent(),
+                        budget.memory_percent(),
                     )
 
             submit_if_possible(ex, pending, futures)
@@ -310,7 +355,7 @@ def main():
     parser.add_argument(
         '--low-mem-tile-w',
         type=int,
-        default=256,
+        default=512,
         help="X-axis tile width used by low-memory top-k merge.")
     parser.add_argument('--variance-trim', default=1.3, type=float,
                         help="factor above median variance to mask pixels",
@@ -324,20 +369,45 @@ def main():
     parser.add_argument(
         '--max-ram-percent',
         type=float,
-        default=70.0,
+        default=50.0,
         help=(
-            "Butler mode (multi-patch): do not start a new parallel load while "
-            "system RAM use is at or above this fraction (requires psutil)."
+            "Butler mode (multi-patch): fraction of --container-ram-gib used as the ceiling "
+            "for process RSS and for the sum of in-flight load reservations (parallel loads). "
+            "RSS gate requires psutil."
         ),
     )
     parser.add_argument(
         '--max-parallel-loads',
         type=int,
-        default=2,
+        default=5,
         help=(
             "Butler mode: maximum concurrent ButlerDataModel loads (I/O threads). "
             "stack.run still runs one at a time on the main thread."
         ),
+    )
+    parser.add_argument(
+        '--container-ram-gib',
+        type=float,
+        default=32.0,
+        help=(
+            "Butler mode: total RAM of the environment (GiB) for RSS %% and reservation cap "
+            "(e.g. cgroup limit), not necessarily host physical RAM."
+        ),
+    )
+    parser.add_argument(
+        '--bytes-per-exposure-mib',
+        type=float,
+        default=200.0,
+        help=(
+            "Butler mode: initial heap estimate per exposure ref for load scheduling; "
+            "refined from measured stack_inputs size (EMA)."
+        ),
+    )
+    parser.add_argument(
+        '--budget-ema',
+        type=float,
+        default=0.15,
+        help="Butler mode: EMA weight when updating bytes-per-exposure after each load.",
     )
 
     sp = parser.add_subparsers(dest='mode')
@@ -477,11 +547,15 @@ def main():
         configure_cli_logging(args.log_level, logfilname, no_tty=args.no_tty)
         logger.debug("Args: %r", args)
         logger.info(
-            "Butler pipeline: %d patch(es) %s; max_parallel_loads=%s max_ram_percent=%s",
+            "Butler pipeline: %d patch(es) %s; max_parallel_loads=%s max_ram_percent=%s "
+            "container_ram_gib=%s bytes_per_exposure_mib=%s budget_ema=%s",
             len(args.patches),
             list(args.patches),
             args.max_parallel_loads,
             args.max_ram_percent if psutil else "n/a",
+            args.container_ram_gib,
+            args.bytes_per_exposure_mib,
+            args.budget_ema,
         )
 
         run_butler_patches_pipeline(args, badflags, run_dtype)

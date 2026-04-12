@@ -128,6 +128,47 @@ def _visit_mjd_mid(exposure, DateTime) -> float:
     return float(start + et * 0.5 / 86400.0)
 
 
+def count_datasets_for_patch(
+    butler: str | Butler,
+    *,
+    collections: str | Sequence[str],
+    dataset_type: str,
+    instrument: str,
+    day_obs: int,
+    skymap: str,
+    tract: int,
+    patch: int,
+    band: str,
+) -> int:
+    """Return the number of dataset refs for a patch (same query as :meth:`ButlerDataModel.refs`).
+
+    This is a lightweight Butler registry query (no image I/O) used to size load reservations.
+    """
+    b: Butler = butler if isinstance(butler, Butler) else Butler(butler, collections=collections)
+    where = (
+        f"instrument='{instrument}' "
+        f"AND day_obs={day_obs} "
+        f"AND skymap='{skymap}' "
+        f"AND tract={tract} "
+        f"AND patch={patch} "
+        f"AND band='{band}'"
+    )
+    refs = sorted(
+        b.query_datasets(
+            dataset_type,
+            collections=collections,
+            where=where,
+            limit=None,
+        ),
+        key=lambda r: r.dataId["visit"],
+    )
+    if not refs:
+        raise ValueError(
+            f"No datasets of type {dataset_type} for collections={collections} where={where}"
+        )
+    return len(refs)
+
+
 class ButlerDataModel:
     """Build the same ``stack_inputs`` dict as :class:`ExtractedDataModel`, from Butler queries.
 
