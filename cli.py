@@ -219,18 +219,20 @@ def run_butler_patches_pipeline(args, badflags: list[str], run_dtype: type) -> N
             if not futures:
                 if not pending:
                     break
-                if psutil is not None and budget.memory_percent() >= max_ram:
-                    logger.info(
-                        "Pausing new loads until RAM < %.1f%% (now %.1f%%)",
-                        max_ram,
-                        budget.memory_percent(),
-                    )
-                    time.sleep(0.4)
-                    continue
+                # Always try to submit first. Do not gate on RSS before submit — that caused
+                # deadlock: with no futures, nothing completes to lower RSS, yet we never called
+                # submit_if_possible (LoadMemoryBudget.can_start_load handles admission).
                 submit_if_possible(ex, pending, futures)
                 if not futures and pending:
-                    # Still could not submit (e.g. at parallel cap or reservation full); wait briefly
-                    time.sleep(0.1)
+                    if psutil is not None and budget.memory_percent() >= max_ram:
+                        logger.info(
+                            "Could not start next load yet (RAM ~%.1f%%, cap %.1f%%); retrying…",
+                            budget.memory_percent(),
+                            max_ram,
+                        )
+                        time.sleep(0.4)
+                    else:
+                        time.sleep(0.1)
                 continue
 
             done, _ = wait(futures.keys(), timeout=2.0, return_when=FIRST_COMPLETED)

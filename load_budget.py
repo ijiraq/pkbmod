@@ -93,19 +93,30 @@ class LoadMemoryBudget:
             if self.reserved_bytes == 0.0 and n_running_loads == 0:
                 logger.warning(
                     "Patch load estimate (%.2f GiB) exceeds budget (%.2f GiB × %.0f%% = %.2f GiB); "
-                    "starting anyway if RSS is below cap — risk of OOM; tune "
+                    "allowing one load while idle — high OOM risk; tune "
                     "--bytes-per-exposure-mib / --max-ram-percent / --container-ram-gib.",
                     estimate_bytes / (1024**3),
                     cap / (1024**3),
                     self.max_ram_fraction * 100,
                     lim / (1024**3),
                 )
-                if psutil is None:
-                    return True
-                return self.rss_bytes() <= lim
+                return True
             return False
         if psutil is None:
             return True
-        if self.rss_bytes() > lim:
+        rss = self.rss_bytes()
+        # With no loads in flight, RSS can stay above the gate after stack.run + gc (allocator
+        # arenas, LSST/C++ heaps). Blocking here starves the pipeline forever. Reservation +
+        # max_parallel still bound concurrent load blow-ups; RSS gate applies when something
+        # is already running or reserved.
+        idle = n_running_loads == 0 and self.reserved_bytes == 0.0
+        if rss > lim and not idle:
             return False
+        if rss > lim and idle:
+            logger.warning(
+                "RSS %.1f%% above gate %.0f%% while idle (no in-flight loads); "
+                "allowing next load — raise --container-ram-gib or --max-ram-percent if OOMs persist.",
+                100.0 * rss / max(cap, 1),
+                self.max_ram_fraction * 100,
+            )
         return True
