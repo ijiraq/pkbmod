@@ -23,8 +23,53 @@ from typing import Any, Mapping, Sequence
 
 from astropy.io import fits
 from astropy.wcs import WCS as AstropyWCS
+from astropy.wcs.utils import proj_plane_pixel_area
 
 logger = logging.getLogger(__name__)
+
+def load(
+    butler: str | Butler,
+    collections: str | Sequence[str],
+    day_obs: int,
+    skymap: str,
+    tract: int,
+    patch: int,
+    band: str,
+    instrument: str,
+    dataset_type: str,
+    data_dtype: np.dtype,
+    psf_dataset_type: str,
+    variance_trim: float,
+    injected_catalog_dataset_type: str = "injected_calexp_catalog",
+) -> dict[str, Any]:
+    """Load from Butler, apply variance mask, pack arrays.
+
+    Returns ``(stack_inputs, n_refs, nbytes_heap_estimate)``. No output paths —
+    callers (e.g. :mod:`cli`) own filenames and formats.
+    """
+    import gc
+
+    dm = DataModel(
+        butler=butler,
+        collections=collections,
+        day_obs=day_obs,
+        skymap=skymap,
+        tract=tract,
+        patch=patch,
+        band=band,
+        instrument=instrument,
+        dataset_type=dataset_type,
+        data_dtype=data_dtype,
+        psf_dataset_type=psf_dataset_type,
+        injected_catalog_dataset_type=injected_catalog_dataset_type,
+    )
+    dm.mask_variance(variance_trim)
+    dm.pack_inputs()
+    stack_inputs = dm.stack_inputs
+    del dm
+    gc.collect()
+    return stack_inputs, n_refs, nbytes
+
 
 
 def _mask_plane_bitmask(mask) -> dict[str, int]:
@@ -100,6 +145,8 @@ def _detection_frame_from_exposure(
     y0 = float(exposure.getY0())
     md = skywcs.getFitsMetadata(precise=False)
     awcs = _skywcs_metadata_to_astropy_wcs(md)
+    # sqrt(area) is deg/pixel; sns_rates expects arcsec/pixel for rate_lims in "/hour.
+    pixel_scale = float(np.sqrt(proj_plane_pixel_area(awcs))) * 3600.0
     ref = {str(k): _json_safe_data_id(v) for k, v in reference_data_id.items()}
     out: dict[str, Any] = {
         "source": "lsst_butler",
@@ -108,6 +155,7 @@ def _detection_frame_from_exposure(
         "parent_origin_xy": (x0, y0),
         "lsst_sky_wcs": skywcs,
         "wcs_astropy": awcs,
+        "pixel_scale": pixel_scale,
     }
     if awcs is not None:
         out["fits_header_text"] = str(awcs.to_header())
@@ -128,48 +176,7 @@ def _visit_mjd_mid(exposure, DateTime) -> float:
     return float(start + et * 0.5 / 86400.0)
 
 
-def count_datasets_for_patch(
-    butler: str | Butler,
-    *,
-    collections: str | Sequence[str],
-    dataset_type: str,
-    instrument: str,
-    day_obs: int,
-    skymap: str,
-    tract: int,
-    patch: int,
-    band: str,
-) -> int:
-    """Return the number of dataset refs for a patch (same query as :meth:`ButlerDataModel.refs`).
-
-    This is a lightweight Butler registry query (no image I/O) used to size load reservations.
-    """
-    b: Butler = butler if isinstance(butler, Butler) else Butler(butler, collections=collections)
-    where = (
-        f"instrument='{instrument}' "
-        f"AND day_obs={day_obs} "
-        f"AND skymap='{skymap}' "
-        f"AND tract={tract} "
-        f"AND patch={patch} "
-        f"AND band='{band}'"
-    )
-    refs = sorted(
-        b.query_datasets(
-            dataset_type,
-            collections=collections,
-            where=where,
-            limit=None,
-        ),
-        key=lambda r: r.dataId["visit"],
-    )
-    if not refs:
-        raise ValueError(
-            f"No datasets of type {dataset_type} for collections={collections} where={where}"
-        )
-    return len(refs)
-
-
-class ButlerDataModel:
+class DataModel:
     """Build the same ``stack_inputs`` dict as :class:`ExtractedDataModel`, from Butler queries.
 
     Plant ``rate_x`` / ``rate_y`` are pixels per day (see :attr:`plants`).
@@ -191,7 +198,7 @@ class ButlerDataModel:
         band: str = 'gri',
         dataset_type: str = "injected_diff_directWarp",
         instrument: str = 'HSC',
-        data_dtype: np.dtype = np.float32,
+        data_dtype:int = 32,
         psf_dataset_type: str = "injected_calexp",
         injected_catalog_dataset_type: str = "injected_calexp_catalog",
     ) -> None:
@@ -217,25 +224,29 @@ class ButlerDataModel:
         self.band = band
         self.day_obs = day_obs
         self.instrument = instrument
-        self.data_dtype = np.dtype(data_dtype)
+        self.data_dtype = np.float16 if data_dtype == 16 else np.float32
+        self.data_dtype = np.dtype(self.data_dtype)
         self.psf_dataset_type = psf_dataset_type
         self.injected_catalog_dataset_type = injected_catalog_dataset_type
         self._stack_inputs: dict | None = None
         self._bitmask: dict | None = None
-        self._plants: Table | None = None
+        logger.info(
+            "Stacking patches from LSST Data Butler using dimensions:\n"
+            f"day_obs:{self.day_obs}\n"
+            f"band: {self.band}\n"
+            f"skymap: {self.skymap}\n"
+            f"tract: {self.tract}\n"
+            f"patch: {self.patch}\n"
+        )
 
     @property
-    def plants(self) -> Table:
-        """Injection truth table for :mod:`stack` / ``sns_data_nh``.
-
-        Columns include ``plant_id``, ``ra``, ``dec``, ``x0``, ``y0`` (reference pixels),
-        ``mag``, and ``rate_x``, ``rate_y``. The rate columns are average
-        motion in **pixels per day**, consistent with ``dmjds`` (day offsets)
-        and :func:`sns_data_nh.get_shift_rates`.
-        """
-        if self._plants is None:
-            self._plants = self._get_injected_source_catalog()
-        return self._plants
+    def data_id(self) -> dict:
+        """a disctionary defining the resulting dataset"""
+        return dict(day_obs=self.day_obs,
+                    band=self.band,
+                    skymap=self.skymap,
+                    tract=self.tract,
+                    patch=self.patch)
 
     @property
     def bitmask(self) -> dict[str, int]:
@@ -293,71 +304,6 @@ class ButlerDataModel:
         kernel = psf.computeKernelImage(p).array
         return kernel, fwhm
 
-    def _get_injected_source_catalog(self):
-        """Load and merge injected-source catalogs from the Butler.
-
-        Dataset type ``injected_calexp_catalog`` holds per-detector tables for
-        each epoch; rows are stacked into one table per epoch, then joined on
-        ``injection_id`` across the first and last warp in ``self.refs``.
-
-        ``rate_ra`` / ``rate_dec`` from injection are unreliable, so ``rate_x``
-        and ``rate_y`` are derived from pixel motion between epochs:
-        ``(X0_final - X0_initial) / dt`` where ``dt`` is the elapsed time between
-        catalog ``day_obs`` values in **days** (``astropy.units``). The resulting
-        rates are **pixels per day**, matching the shift-and-stack convention
-        (``dmjds`` in days × rate in pixels/day).
-
-        Returns:
-            astropy.table.Table: ``plant_id``, ``ra``, ``dec``, ``x0``, ``y0``,
-            ``rate_x``, ``rate_y``, ``mag`` (``ra``/``dec`` from the initial epoch).
-        """
-        data_id = {'initial': self.refs[0].dataId,
-                   'final': self.refs[-1].dataId}
-        # in lsst science pipeline the WCS can have a different x0/y0 compared to the numpy array 
-        # the WCS returns x, y set in the x0/y0 reference and we must remove those to be in the 
-        # np.array from of the image.
-        diff = self.butler.get(self.refs[0])
-        x0, y0 = diff.getXY0()
-        wcs = diff.getWcs()
-        injected_source_catalogs = {}
-        for epoch in data_id:
-            injected_source_catalogs[epoch] = []
-            dataset_refs = self.butler.query_datasets(self.injected_catalog_dataset_type,
-                                                      data_id=data_id[epoch])
-            for ref in dataset_refs:
-                cat = self.butler.get(ref)
-                # convert ra/dec of input into x/y locations using the diff WCS
-                x, y = wcs.skyToPixelArray(cat['ra'], cat['dec'], degrees=True)
-                cat['X0'] = x - x0
-                cat['Y0'] = y - y0 
-                injected_source_catalogs[epoch].append(cat)
-            injected_source_catalogs[epoch] = vstack(injected_source_catalogs[epoch])
-        t1 = Time(injected_source_catalogs['initial'].meta['day_obs'])
-        t2 = Time(injected_source_catalogs['final'].meta['day_obs'])
-        dt = (t2-t1).to(u.day).value
-        cat = join(injected_source_catalogs['initial'], 
-                   injected_source_catalogs['final'], 
-                   keys=['injection_id'])
-        cat['rate_x'] = (cat['X0_2']-cat['X0_1'])/dt
-        cat['rate_y'] = (cat['Y0_2']-cat['Y0_1'])/dt
-        logger.debug(f"Full injected source catalog:\n{cat}")
-        cat = cat[
-            'injection_id',
-            'X0_1',
-            'Y0_1',
-            'ra_1',
-            'dec_1',
-            'rate_x',
-            'rate_y',
-            'mag_1',
-        ]
-        cat['injection_id'].name = 'plant_id'
-        cat['X0_1'].name = 'x0'
-        cat['Y0_1'].name = 'y0'
-        cat['ra_1'].name = 'ra'
-        cat['dec_1'].name = 'dec'
-        cat['mag_1'].name = 'mag'
-        return cat['plant_id', 'ra', 'dec', 'x0','y0', 'rate_x', 'rate_y', 'mag']
 
     def _load_from_butler(self) -> dict[str, Any]:
         """Load the data from the butler and return a dictionary of arrays for stacking."""
@@ -414,7 +360,6 @@ class ButlerDataModel:
             "dmjds": dmjds,
             "fwhms": fwhms,
             "im_nums": im_nums,
-            "plants": self.plants,
             "bitmask": self.bitmask,
             "detection_frame": detection_frame,
         }
@@ -500,3 +445,4 @@ class ButlerDataModel:
             self._stack_inputs["im_nums"], dtype=np.int32
         )
         return self._stack_inputs
+

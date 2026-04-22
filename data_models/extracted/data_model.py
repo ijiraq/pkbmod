@@ -1,62 +1,3 @@
-import argparse
-from astropy.io import fits
-from astropy.table import Table, vstack
-from astropy.wcs import WCS
-from dataclasses import dataclass, field, asdict
-import json
-from glob import glob
-import logging
-import numpy as np
-import re
-from typing import List
-
-logger = logging.getLogger(__name__)
-
-
-def read_flag_list_from_file(flags_fn) -> [str]:
-    """Read the list of flags to mask
-    """
-    flag_keys = []
-    with open(flags_fn) as han:
-        for line in han.readlines():
-            if line.startswith('#'):
-                continue
-            key = line.split()[0]
-            flag_keys.append(key)
-
-    logger.debug(f"FLAG_KEYS: {flag_keys}")
-    return flag_keys
-
-
-@dataclass
-class StackParams(object):
-    params_filename: str  # filename to save parameters to
-    badflags: List[str] = field(default_factory=list)  # bad flags
-    dist_lim: float = 5.0  # candidate-line distance in clustering routine
-    dist_lim_x: int = 4  # maximum cluster distance in x
-    dist_lim_y: int = 6  # maximum cluster distance in y
-    dist_max: float = 4.0  # maximum spatial sep planted/detected link
-    dist_rate_max: float = 60.0  # maximum rate sep  for plan/detected link
-    kernel_width: int = 14  # width of kernel in pixels
-    min_samp: int = 3  # minimum number of clustered detections required
-    min_snr: float = 4.5  # Minimum SNR for a detection
-    n_keep: int = 10000  # number of sources to keep after initial serach
-    peak_offset_max: float = 4  # max distance between peak and centre of stamp
-    rate_fwhm_grid_step: float = 0.75  # width of steps in units of FWHM
-    trim_snr: float = 5.5  # min SNR of sources to keep after clustering
-    use_gaussian_kernel: bool = False  # use a guassian kernel instead of a PSF
-    use_negative_well: bool = True  # use the negative well for detection.
-    variance_trim: float = 1.3  # factor above median variance to mask pixels
-
-    def save(self) -> None:
-        logger.info(f"Saving params to {self.params_filename}")
-        with open(self.params_filename, 'w+') as han:
-            json.dump(asdict(self), han)
-
-    def __iter__(self) -> dict:
-        yield from asdict(self).items()
-
-
 class ExtractedDataModel(object):
     WCS_EXT = 1
     IMAGE_EXT = 1
@@ -93,6 +34,7 @@ class ExtractedDataModel(object):
         self._bitmask = None
         self._plants = None
         self._stack_inputs = None
+        logger.info(f"reading data from {self.path}")
 
     # mask high, low, nan and inf pixels and
     # remove images that are fully masked
@@ -192,7 +134,6 @@ class ExtractedDataModel(object):
             'psfs': psfs,
             'fwhms': fwhms,
             'im_nums': im_nums,
-            'plants': self.plants,
             'bitmask': self.bitmask,
             'detection_frame': {
                 'source': 'fits_warp',
@@ -351,6 +292,6 @@ class ExtractedDataModel(object):
             plants['rate_y'] = (y1-y0)*24.0
             plants.sort('mag')
             plants_list.append(plants)
-        self._plants = vstack(plants_list)
+        self._plants = vstack(plants_list, metadata_conflicts='silent')
         self._plants.sort('mag')
         return self._plants

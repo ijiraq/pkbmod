@@ -1,16 +1,15 @@
-from astropy.wcs import WCS
-from astropy.io import fits
 from astropy import units as u
 from astropy.coordinates import SkyCoord
 import numpy as np
 
-d2r = np.pi/180.0
-r2d = 180.0/np.pi
 
 def calc_ecliptic_angle(wcs, A, B, retrograde=True):
     """
     Returns the retrograde or prograde direction angle of the ecliptic in the provided image.
     """
+
+    d2r = np.pi/180.0
+    r2d = 180.0/np.pi
     
     y,x = A/2, B/2
 
@@ -37,15 +36,3 @@ def calc_ecliptic_angle(wcs, A, B, retrograde=True):
         if RA<ra: return pix_ang+180.
         else: return pix_ang
     
-
-if __name__ == "__main__":
-    import glob
-    
-    warps_path = '/arc/projects/classy/warps'
-    visit = '2022-08-22-AS2'
-    chip = '12'
-    
-    files = glob.glob(f'{warps_path}/{visit}/{chip}/DIFF*fits')
-    files.sort()
-
-    print(calc_ecl_angle(files[0]))
