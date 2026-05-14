@@ -8,6 +8,7 @@ import sys
 import textwrap
 import time
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from pathlib import Path
 from data_models import StackParams
 from data_models import read_flag_list_from_file
 from load_budget import LoadMemoryBudget, stack_inputs_array_nbytes
@@ -60,6 +61,8 @@ def configure_cli_logging(level_name: str, filename: str, *, no_tty: bool = Fals
 
 def _apply_stack_params_from_args(stack_params: StackParams, args) -> None:
     stack_params.use_negative_well = not args.dontUseNegativeWell
+    stack_params.kernel_width = args.kernel_width
+    stack_params.use_gaussian_kernel = args.use_gaussian_kernel
     stack_params.min_snr = args.min_snr
     stack_params.rate_fwhm_grid_step = args.rate_fwhm_grid_step
     stack_params.n_keep = args.n_keep
@@ -69,6 +72,8 @@ def _apply_stack_params_from_args(stack_params: StackParams, args) -> None:
     stack_params.dist_lim_x = 4
     stack_params.dist_lim_y = 6
     stack_params.peak_offset_max = args.peak_offset_max
+    stack_params.dist_max = args.dist_max
+    stack_params.dist_rate_max = args.dist_rate_max
     stack_params.variance_trim = args.variance_trim
     stack_params.badflags = args.badflags
 
@@ -316,7 +321,7 @@ def main():
                         help="Use negative well as detection criterion")
     parser.add_argument('--kernel-width',
                         type=int,
-                        default=15,
+                        default=14,
                         help="Width of the psf kernel",)
     parser.add_argument('--min_snr',
                         type=float,
@@ -334,6 +339,24 @@ def main():
         '--peak-offset-max',
         help="max distance between peak and centre of stamp",
         default=4.0, type=float)
+    parser.add_argument(
+        '--dist-max',
+        type=float,
+        default=4.0,
+        help=(
+            "Max pixel distance (planted x0/y0 vs detection) "
+            "for a plant-detection association and det_* match flags."
+        ),
+    )
+    parser.add_argument(
+        '--dist-rate-max',
+        type=float,
+        default=60.0,
+        help=(
+            "Max Euclidean separation in rate space (planted rate vs "
+            "detection rate grid) for association; units match StackParams.rate_x/y."
+        ),
+    )
     parser.add_argument(
         '--rate_fwhm_grid_step',
         help="width of rate grid steps in units of FWHM",
@@ -471,6 +494,64 @@ def main():
     btargs.add_argument('--psf-dataset-type', type=str, help='What dataset to get PSF from',
                         default='injected_calexp')
 
+    stampsargs = sp.add_parser(
+        'stamps-butler',
+        help=(
+            "Build CFHT-style motion-compensated stamp pickles from Butler warps "
+            "and sns_*_detections.txt."
+        ),
+        formatter_class=ArgumentDefaultsHelpFormatter,
+    )
+    stampsargs.add_argument('butler', help='LSST Butler repository path')
+    stampsargs.add_argument('day_obs', type=int, help='day_obs (must match detection run)')
+    stampsargs.add_argument('skymap', type=str, help='skymap name')
+    stampsargs.add_argument('tract', type=int, help='Tract')
+    stampsargs.add_argument('patch', type=int, help='Patch id')
+    stampsargs.add_argument('--collections', type=str, default='u/NH/coadd')
+    stampsargs.add_argument(
+        '--dataset-type',
+        type=str,
+        default='injected_diff_directWarp',
+    )
+    stampsargs.add_argument('--band', type=str, default='gri')
+    stampsargs.add_argument('--instrument', type=str, default='HSC')
+    stampsargs.add_argument('--psf-dataset-type', type=str, default='injected_calexp')
+    stampsargs.add_argument(
+        '--detections-file',
+        type=str,
+        default=None,
+        help=(
+            "Path to sns_*_detections.txt. Default: "
+            "{butler}/{collections}/pkbmod/{day_obs}/{tract}/{patch}/"
+            "sns_{day_obs}_{band}_{tract}_{patch}_detections.txt"
+        ),
+    )
+    stampsargs.add_argument(
+        '--output-dir',
+        type=str,
+        default=None,
+        help='Directory for pickle outputs (default: same dir as detections file)',
+    )
+    stampsargs.add_argument(
+        '--variance-trim',
+        type=float,
+        default=None,
+        help='Override variance trim (default: params.json next to detections, else 1.3)',
+    )
+    stampsargs.add_argument(
+        '--mask-planes',
+        type=str,
+        default=None,
+        dest='stamps_mask_planes',
+        metavar='PLANES',
+        help='Comma-separated mask plane names (override params.json / --flagkeys)',
+    )
+    stampsargs.add_argument(
+        '--no-wide',
+        action='store_true',
+        help='Only write 21x21 cutouts (omit 43x43 wide stamps)',
+    )
+
     args = parser.parse_args()
 
     # what level of floating point to use (float16 to lower memory footprint)
@@ -532,6 +613,80 @@ def main():
                   dtype=run_dtype)
         return
 
+    if args.mode == 'stamps-butler':
+        from motion_stamps_butler import (
+            CUTOUT_NARROW,
+            CUTOUT_WIDE,
+            resolve_variance_trim_and_badflags,
+            run_motion_stamps,
+        )
+
+        if args.detections_file:
+            results_filename = args.detections_file
+        else:
+            results_filename = "/".join(
+                [
+                    args.butler,
+                    args.collections,
+                    APP_NAME,
+                    str(args.day_obs),
+                    str(args.tract),
+                    str(args.patch),
+                    f"sns_{args.day_obs}_{args.band}_{args.tract}_{args.patch}_detections.txt",
+                ]
+            )
+        output_path = "/".join(
+            [
+                args.butler,
+                args.collections,
+                APP_NAME,
+                str(args.day_obs),
+                str(args.tract),
+                str(args.patch),
+            ]
+        )
+        os.makedirs(output_path, exist_ok=True)
+        logfilname = f"{output_path}/log.txt"
+        configure_cli_logging(args.log_level, logfilname, no_tty=args.no_tty)
+        logger.debug("stamps-butler args: %r", args)
+
+        if os.access(args.flagkeys, os.R_OK):
+            default_bf = read_flag_list_from_file(args.flagkeys)
+        else:
+            default_bf = args.flagkeys.split(",")
+        params_path = Path(results_filename).parent / "params.json"
+        bf_override = (
+            args.stamps_mask_planes.split(",")
+            if getattr(args, "stamps_mask_planes", None)
+            else None
+        )
+        var_trim, badf = resolve_variance_trim_and_badflags(
+            params_path=params_path,
+            variance_trim_cli=args.variance_trim,
+            badflags_cli=bf_override,
+            default_badflags=default_bf,
+        )
+        cutouts = (CUTOUT_NARROW,) if args.no_wide else (CUTOUT_NARROW, CUTOUT_WIDE)
+        run_motion_stamps(
+            butler=args.butler,
+            collections=args.collections,
+            day_obs=args.day_obs,
+            skymap=args.skymap,
+            tract=args.tract,
+            patch=args.patch,
+            band=args.band,
+            dataset_type=args.dataset_type,
+            instrument=args.instrument,
+            psf_dataset_type=args.psf_dataset_type,
+            detections_path=results_filename,
+            output_dir=args.output_dir,
+            flag_keys=badf,
+            variance_trim=var_trim,
+            data_dtype=run_dtype,
+            cutout_sizes=cutouts,
+        )
+        return
+
     if args.mode == 'butler':
         # Log to first patch output dir (each patch also logs via root logger 
         # to same file if same handler — we reconfigure once)
@@ -563,7 +718,7 @@ def main():
         run_butler_patches_pipeline(args, badflags, run_dtype)
         return
 
-    parser.error("Choose a mode: filesystem or butler")
+    parser.error("Choose a mode: filesystem, butler, or stamps-butler")
 
 
 if __name__ == '__main__':

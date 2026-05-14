@@ -452,7 +452,7 @@ def run(stack_inputs: dict, stack_params: dict,
 
     if False:
         # Skip the position filter for now
-        #TODO: Add position filter back in here when we have a way to debug it
+        #TODO: Add position filter back in here when I have a way to debug it
 
         debug_detection_indices = None
         debug_output_dir = None
