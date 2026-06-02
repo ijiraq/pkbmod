@@ -8,10 +8,7 @@ Typical dataset types for warped difference images include
 RA/Dec, then the per-visit calexp whose detector footprint contains that sky
 position is selected to provide the PSF.
 """
-import astropy.units as u
-from astropy.table import Table, vstack
-from astropy.time import Time
-from astropy.table import join
+from astropy.table import Table
 from lsst.afw.image import ImageOrigin
 from lsst.daf.base import DateTime  # noqa: F401  # type: ignore[import-untyped]
 from lsst.daf.butler import Butler
@@ -23,6 +20,8 @@ from typing import Any, Mapping, Sequence
 
 from astropy.io import fits
 from astropy.wcs import WCS as AstropyWCS
+
+from get_injection_catalog import get_injected_source_catalog
 
 logger = logging.getLogger(__name__)
 
@@ -193,7 +192,7 @@ class ButlerDataModel:
         instrument: str = 'HSC',
         data_dtype: np.dtype = np.float32,
         psf_dataset_type: str = "injected_calexp",
-        injected_catalog_dataset_type: str = "injected_calexp_catalog",
+        injection_catalog_dataset_type: str = "injection_catalog",
     ) -> None:
         """
         Args:
@@ -219,7 +218,7 @@ class ButlerDataModel:
         self.instrument = instrument
         self.data_dtype = np.dtype(data_dtype)
         self.psf_dataset_type = psf_dataset_type
-        self.injected_catalog_dataset_type = injected_catalog_dataset_type
+        self.injection_catalog_dataset_type = injection_catalog_dataset_type
         self._stack_inputs: dict | None = None
         self._bitmask: dict | None = None
         self._plants: Table | None = None
@@ -281,8 +280,8 @@ class ButlerDataModel:
         dec = point.getDec().asDegrees()
         ra = point.getRa().asDegrees()
         where=f"instrument='{instrument}' AND visit_detector_region.region OVERLAPS POINT({ra}, {dec})"
-        dataset_ref = self.butler.query_datasets('injected_calexp', 
-                                            collections='u/NH/coadd',
+        dataset_ref = self.butler.query_datasets(self.psf_dataset_type, 
+                                            collections=self.collections,
                                             data_id=dataId,
                                             where=where)
         injected_calexp = self.butler.get(dataset_ref[0])
@@ -296,68 +295,29 @@ class ButlerDataModel:
     def _get_injected_source_catalog(self):
         """Load and merge injected-source catalogs from the Butler.
 
-        Dataset type ``injected_calexp_catalog`` holds per-detector tables for
-        each epoch; rows are stacked into one table per epoch, then joined on
-        ``injection_id`` across the first and last warp in ``self.refs``.
-
-        ``rate_ra`` / ``rate_dec`` from injection are unreliable, so ``rate_x``
-        and ``rate_y`` are derived from pixel motion between epochs:
-        ``(X0_final - X0_initial) / dt`` where ``dt`` is the elapsed time between
-        catalog ``day_obs`` values in **days** (``astropy.units``). The resulting
-        rates are **pixels per day**, matching the shift-and-stack convention
+        Dataset type ``injection_catalog`` holds orbital-element tables that are
+        propagated to the first and last warp in ``self.refs`` via
+        :func:`lsst.source.injection.utils.sso.propagate_injection_catalog`.
+        ``rate_x`` and ``rate_y`` are derived from pixel motion between those
+        visits in **pixels per day**, matching the shift-and-stack convention
         (``dmjds`` in days × rate in pixels/day).
 
         Returns:
             astropy.table.Table: ``plant_id``, ``ra``, ``dec``, ``x0``, ``y0``,
             ``rate_x``, ``rate_y``, ``mag`` (``ra``/``dec`` from the initial epoch).
         """
-        data_id = {'initial': self.refs[0].dataId,
-                   'final': self.refs[-1].dataId}
-        # in lsst science pipeline the WCS can have a different x0/y0 compared to the numpy array 
-        # the WCS returns x, y set in the x0/y0 reference and we must remove those to be in the 
-        # np.array from of the image.
-        diff = self.butler.get(self.refs[0])
-        x0, y0 = diff.getXY0()
-        wcs = diff.getWcs()
-        injected_source_catalogs = {}
-        for epoch in data_id:
-            injected_source_catalogs[epoch] = []
-            dataset_refs = self.butler.query_datasets(self.injected_catalog_dataset_type,
-                                                      data_id=data_id[epoch])
-            for ref in dataset_refs:
-                cat = self.butler.get(ref)
-                # convert ra/dec of input into x/y locations using the diff WCS
-                x, y = wcs.skyToPixelArray(cat['ra'], cat['dec'], degrees=True)
-                cat['X0'] = x - x0
-                cat['Y0'] = y - y0 
-                injected_source_catalogs[epoch].append(cat)
-            injected_source_catalogs[epoch] = vstack(injected_source_catalogs[epoch])
-        t1 = Time(injected_source_catalogs['initial'].meta['day_obs'])
-        t2 = Time(injected_source_catalogs['final'].meta['day_obs'])
-        dt = (t2-t1).to(u.day).value
-        cat = join(injected_source_catalogs['initial'], 
-                   injected_source_catalogs['final'], 
-                   keys=['injection_id'])
-        cat['rate_x'] = (cat['X0_2']-cat['X0_1'])/dt
-        cat['rate_y'] = (cat['Y0_2']-cat['Y0_1'])/dt
-        logger.debug(f"Full injected source catalog:\n{cat}")
-        cat = cat[
-            'injection_id',
-            'X0_1',
-            'Y0_1',
-            'ra_1',
-            'dec_1',
-            'rate_x',
-            'rate_y',
-            'mag_1',
-        ]
-        cat['injection_id'].name = 'plant_id'
-        cat['X0_1'].name = 'x0'
-        cat['Y0_1'].name = 'y0'
-        cat['ra_1'].name = 'ra'
-        cat['dec_1'].name = 'dec'
-        cat['mag_1'].name = 'mag'
-        return cat['plant_id', 'ra', 'dec', 'x0','y0', 'rate_x', 'rate_y', 'mag']
+        return get_injected_source_catalog(
+            day_obs=self.day_obs,
+            skymap=self.skymap,
+            tract=self.tract,
+            patch=self.patch,
+            butler=self.butler,
+            collections=self.collections,
+            instrument=self.instrument,
+            injection_catalog_dataset_type=self.injection_catalog_dataset_type,
+            warp_refs=self.refs,
+            warp_dataset_type=self.dataset_type,
+        )
 
     def _load_from_butler(self) -> dict[str, Any]:
         """Load the data from the butler and return a dictionary of arrays for stacking."""
