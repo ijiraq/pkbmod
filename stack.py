@@ -5,7 +5,7 @@ from astropy.table import Table, vstack
 from pathlib import Path
 from torch.nn import functional
 import torch
-
+from time import perf_counter
 import sns_data_nh as data
 import sns_utils as utils
 from detection_frame import detection_xy_to_radec_deg, write_detection_frame_sidecar
@@ -13,8 +13,7 @@ from detection_frame import detection_xy_to_radec_deg, write_detection_frame_sid
 logger = logging.getLogger(__name__)
 
 EXTENSION_WITH_WCS = 1
-VARIANCE_MASK = 'VARIANCE'
-
+VARIANCE_MASK = 'SAT'
 
 def _detection_rates(detections: np.ndarray,
                      rates: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -187,7 +186,7 @@ def summarize_plant_matches(plants: Table,
 def run(stack_inputs: dict, stack_params: dict,
         results_filename: str, plant_matches_filename: str,
         low_mem: bool = False, low_mem_tile_w: int = 256,
-        dtype=np.float16):
+        dtype=np.float32):
     """Given the data load and stacking parameters run the shift-and-stack
     search.
 
@@ -223,7 +222,9 @@ def run(stack_inputs: dict, stack_params: dict,
     trim_snr = stack_params['trim_snr']
     dist_max = stack_params['dist_max']
     dist_rate_max = stack_params['dist_rate_max']
+    sat_dilate_pixels = stack_params.get('sat_dilate_pixels', 2)
     dtype = np.dtype(dtype)
+
     if dtype == np.float16:
         torch_dtype = torch.float16
     elif dtype == np.float32:
@@ -239,6 +240,7 @@ def run(stack_inputs: dict, stack_params: dict,
 
     logger.debug(("Creating the convolution kernel:"
                    f" Use Guassian:{use_gaussian_kernel}"))
+
     kernel = data.create_kernel(
         psfs=psfs,
         dmjds=dmjds,
@@ -259,6 +261,11 @@ def run(stack_inputs: dict, stack_params: dict,
     del np_variances
     np_masks = np.expand_dims(np.expand_dims(
         np.asarray(masks, dtype=np.uint32), 0), 0)
+
+    if sat_dilate_pixels > 0 and VARIANCE_MASK in bitmask:
+        sat_bit = np.uint32(1) << np.uint32(bitmask[VARIANCE_MASK])
+        utils.dilate_sat_bitmask(np_masks, sat_bit, sat_dilate_pixels)
+        logger.debug("Dilated SAT mask by %d pixels", sat_dilate_pixels)
 
     # (np_masks & badflags) == 0 is FALSE when masks matches a badflag value
     # ~((np_masks & badflags) == 0) is TRUE when mask matches a badflag value
@@ -291,7 +298,7 @@ def run(stack_inputs: dict, stack_params: dict,
 
     # Always use the low-memory shift-and-stack path. Keep the post-shift
     # stages in fp16 as well to reduce resident GPU memory.
-    post_torch_dtype = torch.float16
+    post_torch_dtype = torch.float32
     logger.debug(("Dtypes: initial_shift=%s, post_shift=%s, low_mem_tile_w=%s"),
                   torch_dtype, post_torch_dtype, low_mem_tile_w)
 
@@ -314,7 +321,8 @@ def run(stack_inputs: dict, stack_params: dict,
             kernel[:, :, ir, :, :], padding='same')
         inv_variances[0, 0, ir, :, :] = torch.conv2d(
             inv_variances[:, :, ir, :, :],
-            kernel[:, :, ir, :, :]*kernel[:, :, ir, :, :], padding='same')
+            kernel[:, :, ir, :, :]*kernel[:, :, ir, :, :],
+            padding='same')
 
     if n_keep > len(rates):
         logger.warning((f"Number of stack rate: {len(rates)}"
@@ -325,7 +333,9 @@ def run(stack_inputs: dict, stack_params: dict,
     logger.info("Using low-memory initial shift-and-stack stage")
     logger.debug("run_shifts_topk dtype: work=%s output=%s",
                   torch_dtype, torch_dtype)
-    top_snr, top_alpha, top_rate_idx = utils.run_shifts_topk(
+    start_time = perf_counter()
+    logger.info(f"Starting shift-and-stack")
+    top_snr, top_flux_snr, top_iv_flux_snr, top_alpha, top_rate_idx = utils.run_shifts_topk(
         datas=datas,
         inv_variances=inv_variances,
         rates=rates,
@@ -335,157 +345,176 @@ def run(stack_inputs: dict, stack_params: dict,
         tile_w=low_mem_tile_w,
         work_dtype=torch_dtype,
         output_dtype=torch_dtype)
+    
     detections = utils.topk_to_detections(
         top_snr=top_snr,
+        top_flux_snr=top_flux_snr,
+        top_iv_flux_snr=top_iv_flux_snr,
         top_alpha=top_alpha,
         top_rate_idx=top_rate_idx,
         rates=rates,
         dtype=dtype)
-    del top_snr, top_alpha, top_rate_idx
-    gc.collect()
-
+    end_time = perf_counter()
+    logger.info(f"Shift and stack on {len(dmjds)} images took {end_time-start_time:.1f} seconds")
+    utils.log_snr_debug_samples(
+        detections=detections,
+        datas=datas,
+        inv_variances=inv_variances,
+        dmjds=dmjds,
+        rates=rates,
+        n_im=n_im,
+        khw=khw,
+        stage="post_topk_convolved",
+        run_id="post-fix",
+    )
+    
+    del top_snr, top_flux_snr, top_iv_flux_snr, top_alpha, top_rate_idx
     del datas
     del inv_variances
     gc.collect()
     torch.cuda.empty_cache()
+
     # trim the flux negative sources
     detections = utils.trim_negative_flux(detections)
-    detections_idx = np.arange(len(detections))
-
+    det_idx = np.arange(len(detections))
+    det_type = 'det_shift'
+    det_types = {det_type: det_idx}
+    
     # now apply the brightness filter.
     # Check n_bright_test values between test_low and
     # test_high fraction of the estimated value
     # pad the data and variance arrays
     logger.debug("Post-shift tensor dtype: %s", post_torch_dtype)
-    logger.debug(f"Creating im_datas with shape {np_datas.shape}")
+    logger.debug(f"Creating im_datas, im_masks and inv_vars with padding on shape {np_datas.shape}")
+    
     im_datas = functional.pad(torch.as_tensor(np_datas,
                                               dtype=post_torch_dtype,
                                               device=device),
                               (khw, khw, khw, khw))
-    del np_datas  # I don't think this is used again.
-    gc.collect()
-    logger.debug(f"Creating inv_vars with shape {np_inv_variances.shape}")
+    im_masks = functional.pad(torch.as_tensor(np_masks,
+                                              dtype=post_torch_dtype,
+                                              device=device),
+                              (khw, khw, khw, khw))
     inv_vars = functional.pad(
         torch.as_tensor(
             np.asarray(0.5, dtype=dtype) * np_inv_variances,
             dtype=post_torch_dtype,
             device=device), (khw, khw, khw, khw))
-    del np_inv_variances  # not used again
+
+    # the np (no padding) versions of these arrays are no used again
+    del np_datas 
+    del np_inv_variances 
+    del np_masks 
     gc.collect()
 
     c = torch.zeros_like(im_datas)
     c[0, 0, 0] = im_datas[0, 0, 0]
-    cv = torch.zeros_like(im_datas)
+    cv = torch.zeros_like(inv_vars)
     cv[0, 0, 0] = inv_vars[0, 0, 0]
+    cm = torch.zeros_like(im_masks)
+    cm[0, 0, 0] = im_masks[0, 0, 0]
 
+    start_time = perf_counter()
+    logger.info("Staring brightness filter")
     keeps = utils.brightness_filter_fast(im_datas, inv_vars, c, cv, kernel,
                                          dmjds, rates, detections, khw, n_im,
                                          n_bright_test=10,
                                          test_high=1.15,
                                          test_low=0.85,
                                          word_dtype=post_torch_dtype)
-
+    logger.info(f"filter took {perf_counter()-start_time:.1f} seconds")
     logger.info(f"Number of detections: {len(detections)}")
     logger.info(f"Number kept: {len(keeps)}")
     # filt_detections = np.copy(detections[keeps])
-    filt_detections_idx = detections_idx[keeps]
+    det_idx = det_idx[keeps]
+    det_type = 'det_bright'
+    det_types[det_type] = det_idx
     del keeps
 
-    im_masks = functional.pad(
-        torch.as_tensor(np_masks, dtype=post_torch_dtype, device=device),
-        (khw, khw, khw, khw))
-    del np_masks
-
     # Stamps are built only for the brightness-filtered subset; row k matches
-    # ``filt_detections_idx[k]`` in the master ``detections`` table.
+    # ``det_idx[k]`` in the master ``detections`` table.
     mean_stamps = utils.create_stamps(im_datas, im_masks,
-                                      c, cv, dmjds, rates,
-                                      detections[filt_detections_idx], khw)
-    del im_masks
+                                      c, cm, dmjds, rates,
+                                      detections[det_idx], khw)
+    var_stamps = 1/utils.create_stamps(inv_vars, im_masks,
+                                       cv, cm, dmjds, rates,
+                                       detections[det_idx], khw)
     gc.collect()
     torch.cuda.empty_cache()
 
     stamps = mean_stamps
     # trim the candidates with peak offset more than peak_offset_max pixels
-    peak_keep = utils.peak_offset_filter(
-        stamps, detections[filt_detections_idx], peak_offset_max)
+    start_time = perf_counter()
+    logger.info("Starting peak offset filter")
+    peak_keep = utils.peak_offset_filter(stamps, peak_offset_max)
+    logger.info(f"Peak offset filter took: {perf_counter()-start_time:.1f} seconds")
     stamps = stamps[peak_keep]
-    filt_detections_idx = filt_detections_idx[peak_keep]
+    det_idx = det_idx[peak_keep]
+    det_type = 'det_peak'
+    det_types[det_type] = det_idx
+
+    var_stamps = var_stamps[peak_keep]
+    peak_keep = utils.peak_offset_filter(var_stamps, peak_offset_max)
+    stamps = stamps[peak_keep]
+    det_idx = det_idx[peak_keep]
+    det_type = 'det_pvar'
+    det_types[det_type] = det_idx
+    
+    logger.info(("Number of sources kept after "
+                  f"brightness and peak location filtering: {len(det_idx)}."))
 
     save_filt_detections = False
     if save_filt_detections:
         with open('filt_detections.npy', 'wb') as han:
-            np.save(han, detections[filt_detections_idx])
+            np.save(han, detections[det_idx])
 
     # Clustering indices are into the current filt subset (parallel to stamps).
+    start_time = perf_counter()
+    logger.info("Starting predictive line filter.")
     clust_filt_idx = utils.predictive_line_cluster_indices(
-        detections[filt_detections_idx], dmjds, dist_lim, min_samp,
+        detections[det_idx], dmjds, dist_lim, rates, min_samp,
         init_select_proc_distance=60)
-    gc.collect()
-
+    logger.info(f"Predictive line filter took {perf_counter()-start_time:.1f} seconds")
+    stamps = stamps[clust_filt_idx]
+    det_idx = det_idx[clust_filt_idx]
+    det_type = 'det_clust'
+    det_types[det_type] = det_idx
+    del clust_filt_idx
     logger.info(("Number of sources kept after "
-                  f"brightness and peak location filtering: {len(clust_filt_idx)}."))
+                 f"predictive line filter: {len(det_idx)}"))    
 
-    clust_master_idx = filt_detections_idx[clust_filt_idx]
-    snr_trim = np.where(detections[clust_master_idx, 5] >= trim_snr)[0]
-    clust_filt_idx = clust_filt_idx[snr_trim]
-    clust_master_idx = clust_master_idx[snr_trim]
+    # trim low 'snr' detctions from all indices
+    snr_trim = np.where(detections[det_idx, 5] >= trim_snr)[0]
+    stamps = stamps[snr_trim]
+    det_idx = det_idx[snr_trim]
+    det_type = 'det_snr'
+    det_types[det_type] = det_idx
+    del snr_trim
     logger.info(("Number of sources kept after "
-                  f"final SNR trim: {len(clust_master_idx)}."))
+                 f"SNR trim: {len(det_idx)}"))
 
-    clust_detection_matches = match_detections_to_plants(
-        plants=plants,
-        detections=detections[clust_master_idx],
-        detection_indices=clust_master_idx,
-        rates=rates,
-        dist_max=dist_max,
-        dist_rate_max=dist_rate_max,
-        detection_type='det_clust')
-    logger.info("Clustered detection/plant matches before position filter: %d",
-                 len(clust_detection_matches))
-    cv[0, 0, 0] = inv_vars[0, 0, 0]
+    if True:
+        pos_filt_idx = utils.position_filter(detections[det_idx],
+                                             stamps,
+                                             im_datas,
+                                             inv_vars,
+                                             c,
+                                             cv,
+                                             kernel,
+                                             dmjds,
+                                             rates,
+                                             khw,
+                                             n_offsets=11)
+        stamps = stamps[pos_filt_idx]
+        det_idx = det_idx[pos_filt_idx]
+        det_type = "det_pos"
+        det_types[det_type] = det_idx
+        logger.info(("Number of sources left after "
+                     f"position filter: {len(det_idx)}"))
 
-
-    final_detections = detections[clust_master_idx]
-    final_detection_indices = clust_master_idx
-    final_stamps = stamps[clust_filt_idx]
-
-    if False:
-        # Skip the position filter for now
-        #TODO: Add position filter back in here when I have a way to debug it
-
-        debug_detection_indices = None
-        debug_output_dir = None
-        if len(clust_detection_matches) > 0:
-            debug_detection_indices = np.unique(
-                np.asarray(clust_detection_matches['detection_index'], dtype=int))
-            debug_output_dir = (
-                Path(plant_matches_filename).with_suffix('').parent /
-                f"{Path(plant_matches_filename).with_suffix('').name}.position_filter_debug"
-            )
-
-        grid_detections, grid_stamps = utils.position_filter(
-            detections[clust_master_idx], clust_stamps, im_datas, inv_vars,
-            c, cv, kernel, dmjds, rates, khw, n_offsets=11,
-            debug_detection_indices=debug_detection_indices,
-            debug_output_dir=debug_output_dir)
-
-        w = np.where(grid_detections[:, 5] >= trim_snr)
-        final_stamps = grid_stamps[w]
-        final_detections = grid_detections[w]
-        del grid_detections, grid_stamps
-        
-    logger.info(f'Number of candidates {len(final_detections)}')
-
-    # columns to add to the plant table to track matched detections
-    # Values are row indices into the master ``detections`` table.
-    detection_types = {'det_shift': detections_idx,
-                       'det_filt': filt_detections_idx,
-                       'det_gird': clust_master_idx,
-                       'det_final': final_detection_indices}
     plants, detection_matches = summarize_plant_matches(
         plants=plants,
-        detection_types=detection_types,
+        detection_types=det_types,
         detections=detections,
         rates=rates,
         dist_max=dist_max,
@@ -504,9 +533,38 @@ def run(stack_inputs: dict, stack_params: dict,
     logger.info("Wrote plant/detection join table to: %s",
                  detection_matches_filename)
 
-    order = np.argsort(detections[final_detection_indices, 5])[::-1]
-    final_detection_indices = final_detection_indices[order]
-    final_stamps = final_stamps[order]
+    order = np.argsort(detections[det_idx, 5])[::-1]
+    det_idx = det_idx[order]
+
+    c = torch.zeros_like(im_datas)
+    c[0, 0, 0] = im_datas[0, 0, 0]
+    cv = torch.zeros_like(inv_vars)
+    cv[0, 0, 0] = inv_vars[0, 0, 0]
+    cm = torch.zeros_like(im_masks)
+    cm[0, 0, 0] = im_masks[0, 0, 0]
+    
+    stamps = utils.create_stamps(im_datas, im_masks,
+                                 c, cm, dmjds, rates,
+                                 detections[det_idx], khw)
+    var_stamps = utils.create_stamps(inv_vars, im_masks,
+                                     c, cm, dmjds, rates,
+                                     detections[det_idx], khw)
+
+    # #region agent log — compare reported SNR to raw-coadd stamp appearance
+    utils.log_snr_debug_samples(
+        detections=detections[det_idx],
+        datas=im_datas,
+        inv_variances=inv_vars,
+        dmjds=dmjds,
+        rates=rates,
+        n_im=n_im,
+        khw=khw,
+        stamps=stamps,
+        stage=det_type,
+        run_id="post-fix",
+        recompute_convolved=False,
+    )
+    # #endregion
 
     if detection_frame is not None:
         frame_sidecar = results_filename.rsplit('.', 1)[0] + '_detection_frame.json'
@@ -514,24 +572,30 @@ def run(stack_inputs: dict, stack_params: dict,
 
     logger.info(f"Saving to: {results_filename}")
     with open(results_filename, 'w') as han:
-        for i in range(len(final_detection_indices)):
-            ix = final_detection_indices[i]
+        for i in range(len(det_idx)):
+            ix = det_idx[i]
             rx = rates[round(detections[ix, 2]), 0]
             ry = rates[round(detections[ix, 2]), 1]
-            (x, y, f, snr) = (detections[ix, 0],
-                              detections[ix, 1],
-                              detections[ix, 4],
-                              detections[ix, 5])
+            (x, y, flux_snr_val, f, snr, iv_flux_snr) = (detections[ix, 0],
+                                    detections[ix, 1],
+                                    detections[ix, 3],
+                                    detections[ix, 4],
+                                    detections[ix, 5],
+                                    detections[ix, 6])
             ra_deg, dec_deg = detection_xy_to_radec_deg(detection_frame, float(x), float(y))
-            row = (
-                f'snr: {snr} flux: {f} x: {x} y: {y} x_v: {rx} y_v: {ry}'
+            ra_deg = ra_deg is None and 9999 or ra_deg
+            dec_deg = dec_deg is None and 9999 or dec_deg
+            han.write(
+                f'snr: {snr} flux: {f} x: {x} y: {y} x_v: {rx} y_v: {ry} '
+                f'flux_snr: {flux_snr_val} iv_flux_snr: {iv_flux_snr} '
+                f'ra_deg: {ra_deg} dec_deg: {dec_deg}\n'
             )
-            if ra_deg is not None and dec_deg is not None:
-                row += f' ra_deg: {ra_deg} dec_deg: {dec_deg}'
-            row += '\n'
-            han.write(row)
 
     stamps_filename = results_filename.rsplit('.', 1)[0] + '_stamps.npy'
     logger.info("Writing stamps to: %s. Detections are in order as specified in %s", stamps_filename, results_filename)
-    np.save(stamps_filename, final_stamps)
-    logger.info("Wrote stamps to: %s", stamps_filename)
+    np.save(stamps_filename, stamps)
+    stamps_filename = results_filename.rsplit('.', 1)[0] + '_var_stamps.npy'
+    logger.info("Writing stamps to: %s. Detections are in order as specified in %s", stamps_filename, results_filename)
+    np.save(stamps_filename, var_stamps)
+    
+    # logger.info("Wrote stamps to: %s", stamps_filename)

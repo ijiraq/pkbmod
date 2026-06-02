@@ -75,6 +75,7 @@ def _apply_stack_params_from_args(stack_params: StackParams, args) -> None:
     stack_params.dist_max = args.dist_max
     stack_params.dist_rate_max = args.dist_rate_max
     stack_params.variance_trim = args.variance_trim
+    stack_params.sat_dilate_pixels = args.sat_dilate_pixels
     stack_params.badflags = args.badflags
 
 
@@ -385,6 +386,12 @@ def main():
     parser.add_argument('--variance-trim', default=1.3, type=float,
                         help="factor above median variance to mask pixels",
                         )
+    parser.add_argument(
+        '--sat-dilate-pixels',
+        type=int,
+        default=2,
+        help="Grow SAT mask by N pixels in all directions; 0 disables.",
+    )
     parser.add_argument(
         '--float-precision',
         type=int,

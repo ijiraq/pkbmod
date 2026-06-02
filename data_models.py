@@ -47,6 +47,7 @@ class StackParams(object):
     use_gaussian_kernel: bool = False  # use a guassian kernel instead of a PSF
     use_negative_well: bool = True  # use the negative well for detection.
     variance_trim: float = 1.3  # factor above median variance to mask pixels
+    sat_dilate_pixels: int = 2  # grow SAT mask by N pixels; 0 disables
 
     def save(self) -> None:
         logger.info(f"Saving params to {self.params_filename}")
