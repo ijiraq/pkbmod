@@ -21,12 +21,40 @@ except ImportError:
 
 APP_NAME = 'pkbmod'
 EXTENSION_WITH_WCS = 1
+_PKG_DIR = Path(__file__).resolve().parent
+_DEFAULT_FLAGKEYS = _PKG_DIR / "data" / "flagkeys_nh.dat"
 
 logger = logging.getLogger(__name__)
 
 
 def default_fakes_collection(day_obs: int) -> str:
     return f"fakes/master-fakes/{day_obs}"
+
+
+def resolve_flagkeys_path(flagkeys: str) -> Path:
+    """Resolve --flagkeys relative to cwd, then the package directory."""
+    path = Path(flagkeys)
+    if path.is_file():
+        return path.resolve()
+    pkg_path = _PKG_DIR / path
+    if pkg_path.is_file():
+        return pkg_path
+    return path
+
+
+def load_badflags(flagkeys: str) -> list[str]:
+    """Load mask plane names from a file path or comma-separated list."""
+    flagkeys_path = resolve_flagkeys_path(flagkeys)
+    if flagkeys_path.is_file():
+        return read_flag_list_from_file(flagkeys_path)
+    if "/" in flagkeys or flagkeys.endswith(".dat"):
+        logger.warning(
+            "Flagkeys file not found: %s (cwd=%s, package=%s)",
+            flagkeys,
+            os.getcwd(),
+            _PKG_DIR,
+        )
+    return [f.strip() for f in flagkeys.split(",") if f.strip()]
 
 
 def configure_cli_logging(level_name: str, filename: str, *, no_tty: bool = False) -> None:
@@ -163,9 +191,8 @@ def run_butler_patches_pipeline(args, badflags: list[str], run_dtype: type) -> N
     )
 
     shared_butler = Butler(args.butler, collections=args.collections)
-    fakes_collection = (
-        args.fakes_collection
-        or default_fakes_collection(args.day_obs)
+    fakes_collection = getattr(args, 'fakes_collection', None) or default_fakes_collection(
+        args.day_obs
     )
 
     def submit_if_possible(ex: ThreadPoolExecutor, pending: deque, futures: dict) -> None:
@@ -315,8 +342,12 @@ def main():
                         help="Configure the logging level.",
                         choices=logging.getLevelNamesMapping().keys())
     parser.add_argument('--no-tty', default=False, action='store_true')
-    parser.add_argument('--flagkeys', default='data/flagkeys_nh.dat', type=str,
-                        help='File with list or , seperated list of keys to mask.')
+    parser.add_argument(
+        '--flagkeys',
+        default=str(_DEFAULT_FLAGKEYS),
+        type=str,
+        help='File with list or comma-separated mask plane names.',
+    )
     parser.add_argument(
         '--clust-dist-lim',
         default=4.0,
@@ -581,12 +612,7 @@ def main():
     # what level of floating point to use (float16 to lower memory footprint)
     run_dtype = np.float16 if args.float_precision == 16 else np.float32
 
-    # get the flag names for pixels to mask from a file or string on command line
-    if os.access(args.flagkeys, os.R_OK):
-        badflags = read_flag_list_from_file(args.flagkeys)
-    else:
-        badflags = args.flagkeys.split(",")
-
+    badflags = load_badflags(args.flagkeys)
     args.badflags = badflags
 
     # add mode specific args and set the model
@@ -674,10 +700,7 @@ def main():
         configure_cli_logging(args.log_level, logfilname, no_tty=args.no_tty)
         logger.debug("stamps-butler args: %r", args)
 
-        if os.access(args.flagkeys, os.R_OK):
-            default_bf = read_flag_list_from_file(args.flagkeys)
-        else:
-            default_bf = args.flagkeys.split(",")
+        default_bf = load_badflags(args.flagkeys)
         params_path = Path(results_filename).parent / "params.json"
         bf_override = (
             args.stamps_mask_planes.split(",")
