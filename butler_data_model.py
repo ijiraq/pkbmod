@@ -193,11 +193,15 @@ class ButlerDataModel:
         data_dtype: np.dtype = np.float32,
         psf_dataset_type: str = "injected_calexp",
         injection_catalog_dataset_type: str = "injection_catalog",
+        injection_catalog_collections: str | Sequence[str] | None = None,
     ) -> None:
         """
         Args:
             butler: An open ``lsst.daf.butler.Butler`` instance.
-            collections: Collection name(s) passed to the registry query.
+            collections: Collection(s) for warps, PSFs, and stacking.
+            injection_catalog_collections: Collection(s) for ``injection_catalog``
+                truth tables (per-night fakes; default
+                ``fakes/master-fakes/{day_obs}`` when None).
             dataset_type: Butler dataset type string (e.g. injected diff warps).
             where: Optional ``registry.queryDatasets`` WHERE string. 
             plants: Injection/plant table; if None, :func:`minimal_plants_table` is used.
@@ -219,6 +223,9 @@ class ButlerDataModel:
         self.data_dtype = np.dtype(data_dtype)
         self.psf_dataset_type = psf_dataset_type
         self.injection_catalog_dataset_type = injection_catalog_dataset_type
+        if injection_catalog_collections is None:
+            injection_catalog_collections = f"fakes/master-fakes/{day_obs}"
+        self.injection_catalog_collections = injection_catalog_collections
         self._stack_inputs: dict | None = None
         self._bitmask: dict | None = None
         self._plants: Table | None = None
@@ -313,6 +320,7 @@ class ButlerDataModel:
             patch=self.patch,
             butler=self.butler,
             collections=self.collections,
+            injection_catalog_collections=self.injection_catalog_collections,
             instrument=self.instrument,
             injection_catalog_dataset_type=self.injection_catalog_dataset_type,
             warp_refs=self.refs,

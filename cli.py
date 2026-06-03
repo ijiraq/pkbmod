@@ -25,6 +25,10 @@ EXTENSION_WITH_WCS = 1
 logger = logging.getLogger(__name__)
 
 
+def default_fakes_collection(day_obs: int) -> str:
+    return f"fakes/master-fakes/{day_obs}"
+
+
 def configure_cli_logging(level_name: str, filename: str, *, no_tty: bool = False) -> None:
     """Configure the *root* logger so library ``logging.getLogger(__name__)`` records propagate.
 
@@ -93,6 +97,7 @@ def _load_and_pack_butler_patch(
     psf_dataset_type: str,
     data_dtype: np.dtype,
     variance_trim: float,
+    injection_catalog_collections: str,
 ) -> tuple[dict, str, str, str, int, int]:
     """Blocking I/O + CPU prep in a worker thread. Returns stack_inputs, paths, ref count, nbytes."""
     from butler_data_model import ButlerDataModel
@@ -118,6 +123,7 @@ def _load_and_pack_butler_patch(
         dataset_type=dataset_type,
         data_dtype=data_dtype,
         psf_dataset_type=psf_dataset_type,
+        injection_catalog_collections=injection_catalog_collections,
     )
     dm.mask_variance(variance_trim)
     dm.pack_inputs()
@@ -157,6 +163,10 @@ def run_butler_patches_pipeline(args, badflags: list[str], run_dtype: type) -> N
     )
 
     shared_butler = Butler(args.butler, collections=args.collections)
+    fakes_collection = (
+        args.fakes_collection
+        or default_fakes_collection(args.day_obs)
+    )
 
     def submit_if_possible(ex: ThreadPoolExecutor, pending: deque, futures: dict) -> None:
         while pending:
@@ -202,6 +212,7 @@ def run_butler_patches_pipeline(args, badflags: list[str], run_dtype: type) -> N
                 psf_dataset_type=args.psf_dataset_type,
                 data_dtype=data_dtype,
                 variance_trim=args.variance_trim,
+                injection_catalog_collections=fakes_collection,
             )
             futures[fut] = (patch, estimate)
             logger.info(
@@ -500,6 +511,12 @@ def main():
     btargs.add_argument('--instrument', type=str, help='Instrument', default='HSC')
     btargs.add_argument('--psf-dataset-type', type=str, help='What dataset to get PSF from',
                         default='injected_calexp')
+    btargs.add_argument(
+        '--fakes-collection',
+        type=str,
+        default=None,
+        help='Butler collection for injection_catalog (default: fakes/master-fakes/{day_obs})',
+    )
 
     stampsargs = sp.add_parser(
         'stamps-butler',
@@ -710,11 +727,18 @@ def main():
         logfilname = f"{output_path}/log.txt"
         configure_cli_logging(args.log_level, logfilname, no_tty=args.no_tty)
         logger.debug("Args: %r", args)
+        args.fakes_collection = (
+            args.fakes_collection
+            or default_fakes_collection(args.day_obs)
+        )
         logger.info(
-            "Butler pipeline: %d patch(es) %s; max_parallel_loads=%s max_ram_percent=%s "
+            "Butler pipeline: %d patch(es) %s; collections=%s fakes_collection=%s; "
+            "max_parallel_loads=%s max_ram_percent=%s "
             "container_ram_gib=%s bytes_per_exposure_mib=%s budget_ema=%s",
             len(args.patches),
             list(args.patches),
+            args.collections,
+            args.fakes_collection,
             args.max_parallel_loads,
             args.max_ram_percent if psutil else "n/a",
             args.container_ram_gib,

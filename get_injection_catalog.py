@@ -17,12 +17,17 @@ def get_injected_source_catalog(
     patch: int,
     butler,
     collections: str | Sequence[str],
+    injection_catalog_collections: str | Sequence[str],
     instrument: str = "HSC",
     injection_catalog_dataset_type: str = "injection_catalog",
     warp_refs: Sequence[DatasetRef] | None = None,
     warp_dataset_type: str = "injected_diff_directWarp",
 ):
     """Load and merge injected-source catalogs from the Butler.
+
+    ``injection_catalog_collections`` is the per-night fakes collection (e.g.
+    ``fakes/master-fakes/{day_obs}``). ``collections`` is used only when
+    ``warp_refs`` is not supplied, to query difference-image warps.
 
     Orbital-element tables are propagated to the first and last warp visits,
     projected into each visit's pixel frame, and used to derive average motion
@@ -40,14 +45,15 @@ def get_injected_source_catalog(
     }
     injected_catalog_refs = butler.query_datasets(
         injection_catalog_dataset_type,
-        collections=collections,
+        collections=injection_catalog_collections,
         data_id=data_id,
         find_first=False,
     )
     if not injected_catalog_refs:
         raise ValueError(
             f"No datasets of type {injection_catalog_dataset_type!r} for "
-            f"collections={collections!r} data_id={data_id!r}"
+            f"injection_catalog_collections={injection_catalog_collections!r} "
+            f"data_id={data_id!r}"
         )
 
     injection_catalog = vstack([butler.get(ref) for ref in injected_catalog_refs])
